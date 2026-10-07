@@ -294,10 +294,12 @@ int main(int argc, char **argv) {
         auto *tree = window.findChild<QTreeWidget *>("layerTree");
         QString selectedID = window.currentDocument()->state.active;
         tree->currentItem()->setText(0, "Renamed in UI");
+        app.processEvents();
         check(window.currentDocument()->active()->name == "Renamed in UI", "inline rename UI");
         window.currentDocument()->undo();
         check(window.currentDocument()->active()->name == "Footer text", "inline rename undo");
         tree->currentItem()->setCheckState(0, Qt::Unchecked);
+        app.processEvents();
         check(!window.currentDocument()->active()->visible, "visibility checkbox UI");
         window.currentDocument()->undo();
         check(window.currentDocument()->state.active == selectedID &&

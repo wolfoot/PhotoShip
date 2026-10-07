@@ -447,16 +447,27 @@ void Window::panels() {
         auto *d = currentDocument();
         if (!d)
             return;
-        int i = d->index(item->data(0, Qt::UserRole).toString());
+        const QString id = item->data(0, Qt::UserRole).toString();
+        int i = d->index(id);
         if (i < 0)
             return;
         QString name = item->text(0).left(4096);
         bool visible = item->checkState(0) == Qt::Checked;
         if (d->state.layers[i].name == name && d->state.layers[i].visible == visible)
             return;
-        d->edit("Layer properties", [&]() {
-            d->state.layers[i].name = name;
-            d->state.layers[i].visible = visible;
+        const QString session = d->recoveryPath;
+        // As with selection changes, defer edits that rebuild the tree until Qt finishes using the item.
+        QTimer::singleShot(0, this, [this, id, name, visible, session] {
+            auto *d = currentDocument();
+            if (!d || d->recoveryPath != session)
+                return;
+            const int index = d->index(id);
+            if (index < 0 || (d->state.layers[index].name == name && d->state.layers[index].visible == visible))
+                return;
+            d->edit("Layer properties", [&]() {
+                d->state.layers[index].name = name;
+                d->state.layers[index].visible = visible;
+            });
         });
     });
     connect(layers, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem *, int) {

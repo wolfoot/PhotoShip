@@ -29,7 +29,7 @@ PhotoShip 提供画笔、选区、图层蒙版、非破坏调整和可编辑项�
 | 工作流 | 撤销/重做、后台保存与导出、自动恢复、剪贴板、拖放导入、视口图块缓存 |
 | 语言 | 简体中文、英语、日语、韩语、法语、德语、西班牙语，支持即时切换并保存偏好 |
 
-当前版本：**0.2.1**。Ubuntu 已完成本地构建、自动检查和 X11 启动验证；Windows 构建与打包脚本已提供，仍需在 Windows 环境验证。数位板检查使用模拟事件，真实硬件兼容性取决于设备与驱动。
+当前版本：**0.2.1**。Ubuntu 已完成本地构建、自动检查和 X11 启动验证；Windows 10 x64 已使用 Visual Studio 2022 17.0、Qt 6.2.4 和静态 zlib 1.3.1 完成本地 Release 编译、三组测试及解压便携包后的启动验证。Inno Setup 安装器和 Windows 11 尚未完成本地验证。数位板检查使用模拟事件，真实硬件兼容性取决于设备与驱动。
 
 ## 获取与安装
 
@@ -67,18 +67,27 @@ DEB 动态依赖系统 Qt；通过 apt 安装时会补齐依赖。中日韩字�
 目标平台：Windows 10/11 x64。准备以下工具：
 
 - Visual Studio 2022，安装 **Desktop development with C++** 工作负载。
-- CMake，以及 Qt 6.8.3 的 **MSVC 2022 64-bit** 组件。
+- CMake 3.21+（也可使用 Visual Studio 的 CMake 组件），以及 Qt 6.2+ 的 MSVC x64 组件。CI 使用 Qt 6.8.3 **MSVC 2022 64-bit**；Qt 6.2.4 **MSVC 2019 64-bit** 也可配合 Visual Studio 2022 使用。
 - vcpkg 和 `zlib:x64-windows-static-md`，用于 PSD ZIP 解码。
 - Inno Setup 6，仅在生成安装器时需要。
 
-在项目目录运行 PowerShell：
+尚未安装 vcpkg 时，先克隆并初始化（按实际安装位置修改路径）：
 
 ```powershell
-vcpkg install zlib:x64-windows-static-md
+git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
+& 'C:\vcpkg\bootstrap-vcpkg.bat'
+```
+
+在项目目录运行 PowerShell。脚本会自动查找 Visual Studio 2022；PATH 中没有 CMake 时，使用其自带的 CMake：
+
+```powershell
+& 'C:\vcpkg\vcpkg.exe' install zlib:x64-windows-static-md
 ./scripts/build-windows.ps1 -QtPrefix 'C:\Qt\6.8.3\msvc2022_64' -ZlibToolchain 'C:\vcpkg\scripts\buildsystems\vcpkg.cmake'
 ```
 
-生成含 Qt 运行库的便携包 `dist/PhotoShip-0.2.1-windows-x64.zip`，解压后运行 `photoship.exe`。追加 `-Installer` 可生成 `dist/PhotoShip-0.2.1-windows-x64-setup.exe`，默认安装至当前用户目录。
+生成含 Qt 和 Visual C++ 运行库的便携包 `dist/PhotoShip-0.2.1-windows-x64.zip`，解压后运行 `photoship.exe`。脚本会在部署前清空 `dist/windows`，避免混入旧版本文件。追加 `-Installer` 可生成 `dist/PhotoShip-0.2.1-windows-x64-setup.exe`，默认安装至当前用户目录；需要安装 Inno Setup 6，若安装在非默认目录，应将 `ISCC.exe` 加入 PATH。
+
+若已有使用 MSVC DLL 运行库编译的 x64 静态 zlib，可省略 vcpkg：将 `$env:ZLIB_ROOT` 设为其安装前缀（含 `include/zlib.h`、`include/zconf.h` 和 `lib/zlib.lib`），并省略 `-ZlibToolchain`。`-QtPrefix` 应使用实际 Qt 安装路径；已配置环境变量时可写成 `-QtPrefix $env:QT_ROOT_DIR`。更换编译器，或在 vcpkg 与其他依赖方案之间切换时，应使用独立构建目录或先删除 `build-windows`。
 
 仓库中的 [GitHub Actions 工作流](.github/workflows/build.yml) 配置了两种平台的构建、检查和产物上传。可从成功的工作流运行中下载构建产物；工作流配置本身不代表对应平台已完成验证。
 

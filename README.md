@@ -27,7 +27,7 @@ Built with Qt 6 and C++17, PhotoShip offers brushes, selections, layer masks, no
 | Workflow | Undo/redo, background saving/export, automatic recovery, clipboard, drag-and-drop import and viewport tile caching |
 | Languages | Simplified Chinese, English, Japanese, Korean, French, German and Spanish; instant switching with saved preferences |
 
-Current version: **0.2.1**. Ubuntu has been built, checked automatically and smoke-tested on X11 locally. Windows build and packaging scripts are provided, but still require validation on Windows. Tablet checks use simulated events; real hardware compatibility depends on the device and driver.
+Current version: **0.2.1**. Ubuntu has been built, checked automatically and smoke-tested on X11 locally. Windows 10 x64 Release compilation, all three test suites and extracted portable-package startup have been validated locally with Visual Studio 2022 17.0, Qt 6.2.4 and static zlib 1.3.1. The Inno Setup installer and Windows 11 have not been validated locally. Tablet checks use simulated events; real hardware compatibility depends on the device and driver.
 
 ## Get and install
 
@@ -65,18 +65,27 @@ During development, run the application directly from the build directory:
 Target: Windows 10/11 x64. Prepare:
 
 - Visual Studio 2022 with the **Desktop development with C++** workload.
-- CMake and the **MSVC 2022 64-bit** component of Qt 6.8.3.
+- CMake 3.21+ (the Visual Studio CMake component also works) and Qt 6.2+ for MSVC x64. Qt 6.8.3 **MSVC 2022 64-bit** is the CI configuration; Qt 6.2.4 **MSVC 2019 64-bit** can also be used with Visual Studio 2022.
 - vcpkg with `zlib:x64-windows-static-md` for PSD ZIP decoding.
 - Inno Setup 6, only when building an installer.
 
-Run PowerShell in the project directory:
+If vcpkg is not installed, clone and bootstrap it first (adjust the paths to your installation):
 
 ```powershell
-vcpkg install zlib:x64-windows-static-md
+git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
+& 'C:\vcpkg\bootstrap-vcpkg.bat'
+```
+
+Run PowerShell in the project directory. The script locates Visual Studio 2022 and its bundled CMake when CMake is absent from PATH:
+
+```powershell
+& 'C:\vcpkg\vcpkg.exe' install zlib:x64-windows-static-md
 ./scripts/build-windows.ps1 -QtPrefix 'C:\Qt\6.8.3\msvc2022_64' -ZlibToolchain 'C:\vcpkg\scripts\buildsystems\vcpkg.cmake'
 ```
 
-This creates `dist/PhotoShip-0.2.1-windows-x64.zip`, a portable package with Qt runtime libraries. Extract it and run `photoship.exe`. Add `-Installer` to create `dist/PhotoShip-0.2.1-windows-x64-setup.exe`, which installs to the current user’s directory by default.
+This creates `dist/PhotoShip-0.2.1-windows-x64.zip`, a portable package with Qt and Visual C++ runtime libraries. Extract it and run `photoship.exe`. The script clears `dist/windows` before deployment to avoid packaging files from previous versions. Add `-Installer` to create `dist/PhotoShip-0.2.1-windows-x64-setup.exe`, which installs to the current user’s directory by default; install Inno Setup 6 and put `ISCC.exe` on PATH if it is outside the default installation directory.
+
+If you already have an x64 static zlib library built with the MSVC DLL runtime, vcpkg is optional: set `$env:ZLIB_ROOT` to its prefix (containing `include/zlib.h`, `include/zconf.h` and `lib/zlib.lib`) and omit `-ZlibToolchain`. Set `-QtPrefix` to your actual Qt installation, or use `-QtPrefix $env:QT_ROOT_DIR` when that environment variable is configured. Use a separate build directory or remove `build-windows` when changing compilers or switching between vcpkg and another dependency setup.
 
 The repository’s [GitHub Actions workflow](.github/workflows/build.yml) configures builds, checks and artifact uploads for both platforms. Download artifacts from successful workflow runs. Workflow configuration alone does not confirm platform validation.
 
