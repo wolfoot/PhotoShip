@@ -3,7 +3,10 @@
 #include <QKeyEvent>
 #include <QMimeData>
 #include <QMouseEvent>
+#include <QPaintEvent>
 #include <QPainter>
+#include <QPointer>
+#include <QTabletEvent>
 #include <QUrl>
 #include <QWheelEvent>
 #include <cmath>
@@ -14,6 +17,10 @@ Canvas::Canvas(Document *d, QWidget *parent) : QWidget(parent), document(d) {
     setAcceptDrops(true);
     setMinimumSize(200, 150);
     setObjectName("canvas");
+    document->regionChanged = [self = QPointer<Canvas>(this)](QRect region) {
+        if (self)
+            self->invalidateRegion(region);
+    };
 }
 QTransform Canvas::view() const {
     QTransform t;
@@ -29,8 +36,17 @@ QPointF Canvas::widgetPoint(QPointF p) const {
     return view().map(p);
 }
 void Canvas::invalidate() {
-    stale = true;
+    tiles.clear();
     update();
+}
+void Canvas::invalidateRegion(QRect region) {
+    if (region.isEmpty())
+        return;
+    QRect area = region.adjusted(-2, -2, 2, 2).intersected(QRect(QPoint(), document->state.size));
+    for (int y = area.top() / 256; y <= area.bottom() / 256; ++y)
+        for (int x = area.left() / 256; x <= area.right() / 256; ++x)
+            tiles.remove((quint64(y) << 32) | quint32(x));
+    update(view().mapRect(QRectF(area)).toAlignedRect().adjusted(-3, -3, 3, 3));
 }
 void Canvas::setTool(Tool value) {
     abortGesture();
@@ -66,7 +82,7 @@ void Canvas::updateCursor() {
               : tool == Tool::Move        ? Qt::ArrowCursor
                                           : Qt::CrossCursor);
 }
-void Canvas::paintEvent(QPaintEvent *) {
+void Canvas::paintEvent(QPaintEvent *event) {
     QPainter p(this);
     p.fillRect(rect(), QColor("#202329"));
     p.setRenderHint(QPainter::Antialiasing);
@@ -84,13 +100,42 @@ void Canvas::paintEvent(QPaintEvent *) {
         for (int x = left; x < right; x += tile)
             p.fillRect(QRect(x, y, tile, tile),
                        ((x / tile + y / tile) % 2) ? QColor("#a1a4aa") : QColor("#c5c7cc"));
-    if (stale) {
-        cached = document->composite();
-        stale = false;
-    }
     p.setTransform(t);
     p.setRenderHint(QPainter::SmoothPixmapTransform, scale < 1);
-    p.drawImage(QPoint(), cached);
+    QRect visible = t.inverted()
+                        .mapRect(QRectF(event->rect()))
+                        .toAlignedRect()
+                        .adjusted(-1, -1, 1, 1)
+                        .intersected(QRect(QPoint(), document->state.size));
+    if (!visible.isEmpty())
+        for (int y = visible.top() / 256; y <= visible.bottom() / 256; ++y)
+            for (int x = visible.left() / 256; x <= visible.right() / 256; ++x) {
+                quint64 key = (quint64(y) << 32) | quint32(x);
+                QImage *image = tiles.object(key);
+                if (!image) {
+                    QRect region = QRect(x * 256, y * 256, 256, 256)
+                                       .adjusted(-1, -1, 1, 1)
+                                       .intersected(QRect(QPoint(), document->state.size));
+                    image = new QImage(document->compositeTile(region));
+                    tiles.insert(key, image);
+                    ++tilesRendered;
+                }
+                QRect tile =
+                    QRect(x * 256, y * 256, 256, 256).intersected(QRect(QPoint(), document->state.size));
+                QPoint origin(qMax(0, x * 256 - 1), qMax(0, y * 256 - 1));
+                // Partition in device pixels: fractional view coordinates otherwise leave one-pixel gaps.
+                QRectF device = t.mapRect(QRectF(tile));
+                int left = std::ceil(device.left()), top = std::ceil(device.top());
+                QRect clip(left, top, int(std::ceil(device.right())) - left,
+                           int(std::ceil(device.bottom())) - top);
+                p.save();
+                p.resetTransform();
+                p.setClipRect(clip, Qt::IntersectClip);
+                p.setTransform(t);
+                p.setRenderHint(QPainter::Antialiasing, false);
+                p.drawImage(origin, *image);
+                p.restore();
+            }
     p.restore();
     p.save();
     p.setTransform(t);
@@ -120,7 +165,8 @@ void Canvas::paintEvent(QPaintEvent *) {
         for (int i = 0; i < 4; ++i)
             p.drawRect(QRectF(poly[i] - QPointF(3 / scale, 3 / scale), QSizeF(6 / scale, 6 / scale)));
     }
-    if ((tool == Tool::Brush || tool == Tool::Eraser) && underMouse()) {
+    if ((tool == Tool::Brush || tool == Tool::Eraser || tool == Tool::Clone || tool == Tool::Heal) &&
+        underMouse()) {
         p.setBrush(Qt::NoBrush);
         p.setPen(QPen(Qt::black, 2 / scale));
         p.drawEllipse(cursor, brushSize / 2, brushSize / 2);
@@ -167,19 +213,56 @@ void Canvas::mousePressEvent(QMouseEvent *e) {
         return;
     }
     Layer *l = document->active();
-    if (tool == Tool::Brush || tool == Tool::Eraser) {
-        if (!l || l->isGroup() || (!maskTarget && l->kind != "raster")) {
+    if (tool == Tool::Brush || tool == Tool::Eraser || tool == Tool::Clone || tool == Tool::Heal) {
+        if (!l || l->isGroup() ||
+            ((!maskTarget || tool == Tool::Clone || tool == Tool::Heal) && l->kind != "raster")) {
             pressed = false;
             if (message)
                 message("Select a raster layer to paint, or rasterize the current layer first.");
             return;
         }
-        document->begin(maskTarget ? "Paint mask" : tool == Tool::Eraser ? "Erase" : "Brush stroke");
-        document->paint(start, start, brushSize, foreground, brushOpacity, tool == Tool::Eraser, maskTarget);
+        if (tool == Tool::Clone || tool == Tool::Heal) {
+            if (modifiers.testFlag(Qt::AltModifier)) {
+                samplePoint = start;
+                sampleLayer = l->id;
+                hasSample = true;
+                pressed = false;
+                if (message)
+                    message("Repair source selected. Paint on this layer to clone/heal.");
+                return;
+            }
+            if (!hasSample || sampleLayer != l->id) {
+                pressed = false;
+                if (message)
+                    message("Alt-click this raster layer to select a source first.");
+                return;
+            }
+            repairSource = l->image.copy();
+            repairOffset = samplePoint - start;
+        }
+        document->beginStroke(maskTarget             ? "Paint mask"
+                              : tool == Tool::Heal   ? "Heal stroke"
+                              : tool == Tool::Clone  ? "Clone stroke"
+                              : tool == Tool::Eraser ? "Erase"
+                                                     : "Brush stroke",
+                              maskTarget && tool != Tool::Clone && tool != Tool::Heal);
+        double diameter = brushSize * (pressureSize ? pressure : 1),
+               alpha = brushOpacity * (pressureOpacity ? pressure : 1);
+        if (tool == Tool::Clone || tool == Tool::Heal)
+            document->repair(start, start, repairOffset, diameter, alpha, tool == Tool::Heal, repairSource);
+        else
+            document->paint(start, start, diameter, foreground, alpha, tool == Tool::Eraser, maskTarget);
         gestureEdited = true;
-        invalidate();
+        update();
     } else if (tool == Tool::Move) {
         scaling = false;
+        movingSelection = false;
+        if (l && l->kind == "raster" && !document->state.selection.isEmpty() &&
+            document->state.selection.contains(start)) {
+            movingSelection = true;
+            draft = document->state.selection;
+            return;
+        }
         if (l && !l->isGroup()) {
             QSizeF source = l->image.isNull() ? l->size : l->image.size();
             QPointF handle = l->transform().map(QPointF(source.width(), source.height()));
@@ -204,16 +287,18 @@ void Canvas::mousePressEvent(QMouseEvent *e) {
                 }
                 if (!visible)
                     continue;
-                QImage pixels = candidate.pixels();
                 QPoint local = candidate.transform().inverted().map(start).toPoint();
-                if (pixels.rect().contains(local) && qAlpha(pixels.pixel(local)) > 0) {
+                QImage pixels = candidate.pixels(QRect(local, QSize(1, 1)));
+                if (!pixels.isNull() && qAlpha(pixels.pixel(0, 0)) > 0) {
                     hit = candidate.id;
                     break;
                 }
             }
             if (!hit.isEmpty()) {
-                document->state.active = hit;
-                document->notify();
+                if (!document->selectedMembers().contains(hit))
+                    document->setSelected({hit}, hit);
+                else
+                    document->notify();
             } else {
                 pressed = false;
                 return;
@@ -258,11 +343,23 @@ void Canvas::mouseMoveEvent(QMouseEvent *e) {
         update();
         return;
     }
-    if (tool == Tool::Brush || tool == Tool::Eraser) {
-        document->paint(last, cursor, brushSize, foreground, brushOpacity, tool == Tool::Eraser, maskTarget);
+    if (tool == Tool::Brush || tool == Tool::Eraser || tool == Tool::Clone || tool == Tool::Heal) {
+        double diameter = brushSize * (pressureSize ? pressure : 1),
+               alpha = brushOpacity * (pressureOpacity ? pressure : 1);
+        if (tool == Tool::Clone || tool == Tool::Heal)
+            document->repair(last, cursor, repairOffset, diameter, alpha, tool == Tool::Heal, repairSource);
+        else
+            document->paint(last, cursor, diameter, foreground, alpha, tool == Tool::Eraser, maskTarget);
         last = cursor;
-        invalidate();
+        update();
     } else if (tool == Tool::Move) {
+        if (movingSelection) {
+            QTransform t;
+            t.translate(cursor.x() - start.x(), cursor.y() - start.y());
+            draft = t.map(oldSelection);
+            update();
+            return;
+        }
         Layer *l = document->active();
         if (!l)
             return;
@@ -290,7 +387,7 @@ void Canvas::mouseMoveEvent(QMouseEvent *e) {
             QPointF corner = original.transform().map(QPointF());
             l->position += corner - l->transform().map(QPointF());
         } else {
-            auto ids = document->descendants(l->id);
+            auto ids = document->selectedMembers();
             QPointF delta = cursor - start;
             for (int i = 0; i < document->state.layers.size(); ++i)
                 if (ids.contains(document->state.layers[i].id))
@@ -326,7 +423,15 @@ void Canvas::mouseReleaseEvent(QMouseEvent *e) {
         updateCursor();
         return;
     }
-    if (tool == Tool::Brush || tool == Tool::Eraser || tool == Tool::Move) {
+    if (movingSelection) {
+        QString error;
+        if (!document->moveSelection(documentPoint(e->position()) - start,
+                                     modifiers.testFlag(Qt::AltModifier), &error) &&
+            message)
+            message(error);
+        movingSelection = false;
+    } else if (tool == Tool::Brush || tool == Tool::Eraser || tool == Tool::Clone || tool == Tool::Heal ||
+               tool == Tool::Move) {
         if (gestureEdited)
             document->commit();
         else
@@ -349,7 +454,29 @@ void Canvas::mouseReleaseEvent(QMouseEvent *e) {
     draft = {};
     pressed = false;
     originalLayers.clear();
-    invalidate();
+    repairSource = {};
+    update();
+}
+void Canvas::tabletEvent(QTabletEvent *e) {
+    if (tool != Tool::Brush && tool != Tool::Eraser && tool != Tool::Clone && tool != Tool::Heal) {
+        e->ignore();
+        return;
+    }
+    pressure = qBound(.02, e->pressure(), 1.0);
+    QEvent::Type type = e->type() == QEvent::TabletPress     ? QEvent::MouseButtonPress
+                        : e->type() == QEvent::TabletRelease ? QEvent::MouseButtonRelease
+                                                             : QEvent::MouseMove;
+    QMouseEvent mouse(type, e->position(), e->globalPosition(),
+                      type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton,
+                      type == QEvent::MouseButtonRelease ? Qt::NoButton : Qt::LeftButton, e->modifiers());
+    if (type == QEvent::MouseButtonPress) {
+        mousePressEvent(&mouse);
+    } else if (type == QEvent::MouseButtonRelease) {
+        mouseReleaseEvent(&mouse);
+        pressure = 1;
+    } else
+        mouseMoveEvent(&mouse);
+    e->accept();
 }
 void Canvas::wheelEvent(QWheelEvent *e) {
     QPointF anchor = documentPoint(e->position());
@@ -361,9 +488,13 @@ void Canvas::wheelEvent(QWheelEvent *e) {
     e->accept();
 }
 void Canvas::abortGesture() {
-    if (pressed && !panning && (tool == Tool::Brush || tool == Tool::Eraser || tool == Tool::Move))
+    if (pressed && !panning &&
+        (tool == Tool::Brush || tool == Tool::Eraser || tool == Tool::Clone || tool == Tool::Heal ||
+         tool == Tool::Move))
         document->cancel();
     draft = {};
+    repairSource = {};
+    movingSelection = false;
     pressed = panning = false;
     originalLayers.clear();
     invalidate();

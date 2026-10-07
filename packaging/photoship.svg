@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <title>PhotoShip — Layer Sail</title>
+  <desc>Two luminous image layers form a sail above a coral hull on a rounded midnight-blue tile.</desc>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#263654"/><stop offset="1" stop-color="#101a2f"/></linearGradient>
+    <linearGradient id="cyan" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#b8fff1"/><stop offset="1" stop-color="#31bfd8"/></linearGradient>
+    <linearGradient id="violet" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#c2b8ff"/><stop offset="1" stop-color="#7188ed"/></linearGradient>
+    <linearGradient id="coral" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#ffba8e"/><stop offset="1" stop-color="#f06a86"/></linearGradient>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="url(#tile)"/>
+  <rect x="27" y="27" width="458" height="458" rx="99" fill="none" stroke="#ffffff" stroke-opacity=".09" stroke-width="2"/>
+  <path d="M246 104 L246 311 L108 311 Z" fill="url(#cyan)"/>
+  <path d="M246 104 L246 143 L134 311 L108 311 Z" fill="#ffffff" opacity=".22"/>
+  <path d="M274 164 L404 311 L274 311 Z" fill="url(#violet)"/>
+  <path d="M274 164 L296 190 L296 311 L274 311 Z" fill="#ffffff" opacity=".17"/>
+  <path d="M102 339 L410 339 L352 407 L165 407 Z" fill="url(#coral)"/>
+  <path d="M102 339 L410 339 L399 352 L114 352 Z" fill="#fff1e7" opacity=".65"/>
+  <circle cx="374" cy="125" r="20" fill="#ffbe94"/>
+</svg>

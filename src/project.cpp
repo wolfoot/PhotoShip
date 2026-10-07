@@ -37,25 +37,43 @@ static bool validate(const State &s, QString &error) {
         parents[l.id] = l.parent;
         if (l.isGroup())
             groups.insert(l.id);
-        if (!QStringList{"raster", "group", "text", "shape"}.contains(l.kind) ||
+        if (!QStringList{"raster", "group", "text", "shape", "adjustment"}.contains(l.kind) ||
             !Document::blendModes().contains(l.blend) || !finite(l.opacity, 0, 1) ||
             !finite(l.rotation, -360000, 360000) || !finite(l.position.x(), -1000000, 1000000) ||
             !finite(l.position.y(), -1000000, 1000000) || !finite(l.size.width(), 1, MaxSide) ||
             !finite(l.size.height(), 1, MaxSide))
             return fail(error, "Invalid layer kind, appearance, or transform.");
         if (l.isGroup()) {
-            if (!l.image.isNull() || !l.mask.isNull() || l.blend != "Normal")
+            if (!l.image.isNull() || !l.mask.isNull() || l.blend != "Normal" || l.clipped)
                 return fail(error, "Group masks and group blend modes are not supported in this version.");
         } else {
             QSize source = l.image.isNull() ? l.size.toSize() : l.image.size();
             if (!Document::validSize(source, MaxSourcePixels))
                 return fail(error, "Layer source is too large.");
-            pixels += qint64(source.width()) * source.height();
+            if (l.kind != "adjustment")
+                pixels += qint64(source.width()) * source.height();
             if (!l.mask.isNull()) {
                 if (l.mask.size() != source)
                     return fail(error, "Mask dimensions must match the layer source.");
                 masks += qint64(l.mask.width()) * l.mask.height();
             }
+        }
+        if (l.kind == "adjustment") {
+            if (!QStringList{"Levels", "Curves", "Hue / Saturation", "Invert"}.contains(l.adjustment) ||
+                !finite(l.first, -180, 255) || !finite(l.second, -100, 100) || !finite(l.third, -100, 255) ||
+                l.curve.size() > 256 || !l.image.isNull() || l.clipped || l.blend != "Normal")
+                return fail(error, "Invalid adjustment layer.");
+            if (l.adjustment == "Levels" &&
+                (l.first < 0 || l.first >= l.third || l.second < .1 || l.second > 10))
+                return fail(error, "Invalid Levels values.");
+            double previous = -1;
+            for (const auto &point : l.curve) {
+                if (!finite(point.x(), 0, 1) || !finite(point.y(), 0, 1) || point.x() <= previous)
+                    return fail(error, "Invalid curve points.");
+                previous = point.x();
+            }
+            if (l.adjustment == "Curves" && l.curve.size() < 2)
+                return fail(error, "Missing curve points.");
         }
         if (l.kind == "text" &&
             (l.text.size() > 100000 || l.font.pointSizeF() < 1 || l.font.pointSizeF() > 1000))
@@ -142,7 +160,7 @@ bool loadProject(const QString &path, State &result, QString &error) {
     if (!comp && obj["format"].toString() != Format)
         return fail(error, "Unrecognized project format.");
     int version = obj["version"].toInt(-1);
-    if ((comp && (version < 1 || version > 11)) || (!comp && version != 1))
+    if ((comp && (version < 1 || version > 11)) || (!comp && version != 1 && version != 2))
         return fail(error, "Unsupported project version.");
     if (obj["colorSpace"].toString() != "sRGB")
         return fail(error, "Only sRGB projects are supported.");
@@ -237,6 +255,25 @@ bool loadProject(const QString &path, State &result, QString &error) {
             l.image.fill(Qt::transparent);
             images += qint64(l.image.width()) * l.image.height();
         }
+        if (record.contains("clipped") && !record["clipped"].isBool())
+            return fail(error, "Invalid clipping flag.");
+        l.clipped = record["clipped"].toBool();
+        if (l.kind == "adjustment") {
+            auto a = record["adjustment"].toObject();
+            if (!a["kind"].isString() || !a["first"].isDouble() || !a["second"].isDouble() ||
+                !a["third"].isDouble() || !a["curve"].isArray())
+                return fail(error, "Invalid adjustment parameters.");
+            l.adjustment = a["kind"].toString();
+            l.first = a["first"].toDouble();
+            l.second = a["second"].toDouble();
+            l.third = a["third"].toDouble();
+            for (const auto &v : a["curve"].toArray()) {
+                auto point = v.toArray();
+                if (point.size() != 2 || !point[0].isDouble() || !point[1].isDouble())
+                    return fail(error, "Invalid curve point.");
+                l.curve << QPointF(point[0].toDouble(), point[1].toDouble());
+            }
+        }
         l.text = record["textContent"].toString();
         if (!l.font.fromString(record["font"].toString(l.font.toString())))
             return fail(error, "Invalid font description.");
@@ -270,10 +307,21 @@ static QJsonObject manifest(const State &state) {
                            {"font", l.font.toString()},
                            {"color", l.color.name(QColor::HexArgb)},
                            {"shapeKind", l.shape}};
+        record["clipped"] = l.clipped;
+        if (l.kind == "adjustment") {
+            QJsonArray points;
+            for (const auto &p : l.curve)
+                points.append(QJsonArray{p.x(), p.y()});
+            record["adjustment"] = QJsonObject{{"kind", l.adjustment},
+                                               {"first", l.first},
+                                               {"second", l.second},
+                                               {"third", l.third},
+                                               {"curve", points}};
+        }
         layers.append(record);
     }
     return {{"format", Format},
-            {"version", 1},
+            {"version", 2},
             {"colorSpace", "sRGB"},
             {"documentID", state.id},
             {"width", state.size.width()},
@@ -300,7 +348,7 @@ bool saveProject(const QString &path, const State &state, QString &error) {
     if (QFileInfo(root.filePath("manifest.json")).exists()) {
         QFile file(root.filePath("manifest.json"));
         if (!file.open(QIODevice::ReadOnly) || file.size() > 4 * 1024 * 1024)
-            return fail(error, "Existing directory is not a Pixel Studio project.");
+            return fail(error, "Existing directory is not a PhotoShip project.");
         old = QJsonDocument::fromJson(file.readAll()).object();
         if (old["format"].toString() != Format || old["documentID"].toString() != state.id)
             return fail(error, "Refusing to replace another project. Choose a new project directory.");
@@ -308,7 +356,7 @@ bool saveProject(const QString &path, const State &state, QString &error) {
         QStringList entries = root.entryList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden);
         entries.removeAll(".save.lock");
         if (!entries.isEmpty())
-            return fail(error, "Existing directory is not an empty directory or a Pixel Studio project.");
+            return fail(error, "Existing directory is not an empty directory or a PhotoShip project.");
     }
     if (QFileInfo(root.filePath("images")).isSymLink() || !root.mkpath("images"))
         return fail(error, "Cannot create a safe project asset directory.");

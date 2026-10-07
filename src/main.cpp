@@ -1,3 +1,4 @@
+#include "i18n.h"
 #include "window.h"
 #include <QApplication>
 #include <QCommandLineParser>
@@ -5,9 +6,11 @@
 #include <QTimer>
 int main(int argc, char **argv) {
     QApplication app(argc, argv);
-    app.setApplicationName("Pixel Studio");
-    app.setApplicationVersion("0.1.0");
+    app.setApplicationName("PhotoShip");
+    app.setApplicationVersion("0.2.1");
     app.setOrganizationName("PixelStudio");
+    ps::setLanguage(ps::preferredLanguage(), false);
+    app.setWindowIcon(ps::applicationIcon());
     app.setStyle("Fusion");
     QPalette palette;
     palette.setColor(QPalette::Window, QColor("#2b2f37"));
@@ -30,14 +33,18 @@ int main(int argc, char **argv) {
         "QTabBar::tab:selected { background:#3b424f; } QPushButton { padding:6px; } QMenu { padding:5px; } "
         "QStatusBar { color:#bac3d5; }");
     QCommandLineParser parser;
-    parser.setApplicationDescription("Pixel Studio — layer-based image editor");
+    parser.setApplicationDescription("PhotoShip — layer-based image editor");
     parser.addHelpOption();
     parser.addVersionOption();
     parser.addOption({"demo", "Open a built-in demo document."});
     parser.addOption(
         {"screenshot", "Write a demo UI screenshot and exit (for visual verification).", "path"});
     parser.addPositionalArgument("files", "Images, .psproj/.comp folders, or project manifests.", "[files…]");
+    parser.addOption(
+        {"language", "Interface language: en, zh_CN, ja, ko, fr, de, es (one launch only).", "code"});
     parser.process(app);
+    if (parser.isSet("language") && !ps::setLanguage(parser.value("language"), false))
+        parser.showHelp(1);
     ps::Window window;
     window.show();
     for (const auto &file : parser.positionalArguments())

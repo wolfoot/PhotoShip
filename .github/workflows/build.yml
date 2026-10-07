@@ -11,12 +11,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y qt6-base-dev qt6-qpa-plugins cmake ninja-build
+        run: sudo apt-get update && sudo apt-get install -y qt6-base-dev qt6-qpa-plugins zlib1g-dev cmake ninja-build
       - name: Build, test, and package
         run: scripts/build-linux.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: pixelstudio-ubuntu-amd64
+          name: photoship-ubuntu-amd64
           path: dist/*.deb
   windows:
     runs-on: windows-2022
@@ -28,12 +28,15 @@ jobs:
           version: '6.8.3'
           arch: win64_msvc2022_64
           cache: true
+      - name: Prepare PSD compression dependency
+        shell: pwsh
+        run: vcpkg install zlib:x64-windows-static-md
       - name: Build, test, and deploy
         shell: pwsh
-        run: ./scripts/build-windows.ps1 -QtPrefix "$env:QT_ROOT_DIR" -Installer
+        run: ./scripts/build-windows.ps1 -QtPrefix "$env:QT_ROOT_DIR" -ZlibToolchain "$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -Installer
       - uses: actions/upload-artifact@v4
         with:
-          name: pixelstudio-windows-x64
+          name: photoship-windows-x64
           path: |
             dist/*.zip
             dist/*setup.exe

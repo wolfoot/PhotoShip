@@ -1,4 +1,6 @@
 #include "window.h"
+#include "i18n.h"
+#include "psd.h"
 #include <QActionGroup>
 #include <QApplication>
 #include <QCheckBox>
@@ -10,6 +12,7 @@
 #include <QDir>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
+#include <QDropEvent>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -27,6 +30,7 @@
 #include <QSaveFile>
 #include <QSignalBlocker>
 #include <QSpinBox>
+#include <QStandardPaths>
 #include <QStatusBar>
 #include <QStyle>
 #include <QTabWidget>
@@ -37,11 +41,53 @@
 #include <algorithm>
 #include <cmath>
 namespace ps {
+class LayerTree : public QTreeWidget {
+  public:
+    std::function<void(QStringList, QString, QString)> moveLayers;
+    void dropEvent(QDropEvent *event) override {
+        QStringList ids;
+        for (auto *item : selectedItems())
+            ids << item->data(0, Qt::UserRole).toString();
+        auto *target = itemAt(event->position().toPoint());
+        QString parent, before;
+        auto pos = dropIndicatorPosition();
+        if (target) {
+            auto id = target->data(0, Qt::UserRole).toString();
+            if (pos == OnItem && target->data(0, Qt::UserRole + 1).toBool())
+                parent = id;
+            else {
+                auto *container = target->parent();
+                parent = container ? container->data(0, Qt::UserRole).toString() : QString();
+                if (pos == BelowItem)
+                    before = id;
+                else {
+                    int i = container ? container->indexOfChild(target) : indexOfTopLevelItem(target);
+                    auto *above =
+                        i > 0 ? (container ? container->child(i - 1) : topLevelItem(i - 1)) : nullptr;
+                    if (above)
+                        before = above->data(0, Qt::UserRole).toString();
+                }
+            }
+        }
+        if (!target && topLevelItemCount())
+            before = topLevelItem(topLevelItemCount() - 1)->data(0, Qt::UserRole).toString();
+        event->ignore();
+        if (moveLayers)
+            moveLayers(ids, parent, before);
+    }
+};
 Window::Window() {
+    persistence = new Persistence(this);
+    recoveryTimer.setSingleShot(true);
+    recoveryTimer.setInterval(1500);
+    recoveryInterval.setInterval(30000);
+    connect(&recoveryTimer, &QTimer::timeout, this, &Window::snapshotRecovery);
+    connect(&recoveryInterval, &QTimer::timeout, this, &Window::snapshotRecovery);
+    recoveryInterval.start();
     setObjectName("editorWindow");
     resize(1440, 920);
     setMinimumSize(900, 620);
-    setWindowTitle("Pixel Studio");
+    setWindowTitle("PhotoShip");
     setDockNestingEnabled(true);
     tabs = new QTabWidget(this);
     tabs->setObjectName("documents");
@@ -51,6 +97,10 @@ Window::Window() {
     tools();
     panels();
     menus();
+    translateWidgets(this);
+    for (int i = 0; i < blend->count(); ++i)
+        blend->setItemText(i, ui(blend->itemData(i).toString()));
+    setWindowIcon(applicationIcon());
     connect(tabs, &QTabWidget::currentChanged, this, [this]() {
         for (const auto &d : documents)
             for (int i = 0; i < tabs->count(); ++i) {
@@ -61,8 +111,32 @@ Window::Window() {
         refresh();
     });
     connect(tabs, &QTabWidget::tabCloseRequested, this, &Window::closeTab);
-    statusBar()->showMessage("Ready  •  Drop images onto the canvas to import them");
+    statusBar()->showMessage(ui("Ready  •  Drop images onto the canvas to import them"));
     newDocument();
+    if (!qEnvironmentVariableIsSet("PHOTOSHIP_TESTING") && !qEnvironmentVariableIsSet("PIXELSTUDIO_TESTING"))
+        QTimer::singleShot(0, this, &Window::recoverDocuments);
+}
+void Window::changeEvent(QEvent *event) {
+    QMainWindow::changeEvent(event);
+    if (event->type() != QEvent::LanguageChange || !tabs)
+        return;
+    translateWidgets(this);
+    {
+        QSignalBlocker blocker(blend);
+        for (int i = 0; i < blend->count(); ++i)
+            blend->setItemText(i, ui(blend->itemData(i).toString()));
+    }
+    for (auto *choice : findChildren<QAction *>())
+        if (choice->property("languageCode").isValid())
+            choice->setChecked(choice->property("languageCode").toString() == currentLanguage());
+    setColor(foreground);
+    refresh();
+    statusBar()->showMessage(ui("Ready  •  Drop images onto the canvas to import them"));
+}
+Window::~Window() {
+    recoveryTimer.stop();
+    recoveryInterval.stop();
+    persistence->wait();
 }
 Document *Window::currentDocument() const {
     auto *c = currentCanvas();
@@ -84,20 +158,31 @@ QAction *Window::action(const QString &name, const QKeySequence &key, const std:
 void Window::addDocument(Document document) {
     auto d = std::make_unique<Document>(std::move(document));
     auto *raw = d.get();
+    if (raw->recoveryPath.isEmpty())
+        raw->recoveryPath = QDir(recoveryDirectory())
+                                .filePath(QUuid::createUuid().toString(QUuid::WithoutBraces) + ".psproj");
     documents.push_back(std::move(d));
     auto *c = new Canvas(raw, this);
     c->setTool(currentTool);
     c->foreground = foreground;
+    c->pressureSize = findChild<QCheckBox *>("pressureSize")->isChecked();
+    c->pressureOpacity = findChild<QCheckBox *>("pressureOpacity")->isChecked();
     c->brushSize = brushSize->value();
     c->brushOpacity = brushOpacity->value() / 100.0;
     c->tolerance = tolerance->value();
-    c->message = [this](const QString &message) { statusBar()->showMessage(message, 7000); };
+    c->message = [this](const QString &message) { statusBar()->showMessage(ui(message), 7000); };
     c->colorPicked = [this](QColor color) { setColor(color); };
     c->createText = [this](QPointF at) { editText(at); };
     c->filesDropped = [this](const QStringList &paths) { importImages(paths); };
-    raw->changed = [this, c]() {
-        c->invalidate();
+    raw->regionChanged = [c](QRect region) { c->invalidateRegion(region); };
+    raw->changed = [this, c, raw]() {
+        if (raw->lastChange.isEmpty())
+            c->invalidate();
+        else
+            c->invalidateRegion(raw->lastChange);
         refresh();
+        if (raw->dirty() && !raw->isEditing())
+            recoveryTimer.start();
     };
     int i = tabs->addTab(c, "Untitled");
     tabs->setCurrentIndex(i);
@@ -111,8 +196,8 @@ void Window::newDocument(QSize size) {
     addDocument(Document::create(size));
 }
 void Window::error(const QString &message) {
-    QMessageBox::warning(this, "Pixel Studio",
-                         message.isEmpty() ? "The operation could not be completed." : message);
+    QMessageBox::warning(this, "PhotoShip",
+                         ui(message.isEmpty() ? "The operation could not be completed." : message));
 }
 void Window::run(const std::function<bool(Document *, QString *)> &op) {
     if (!currentDocument())
@@ -154,6 +239,8 @@ void Window::tools() {
     const QVector<Definition> definitions = {{"V  Move", "V", Tool::Move},
                                              {"B  Brush", "B", Tool::Brush},
                                              {"E  Eraser", "E", Tool::Eraser},
+                                             {"S  Clone", "S", Tool::Clone},
+                                             {"J  Heal", "J", Tool::Heal},
                                              {"M  Marquee", "M", Tool::RectangleSelect},
                                              {"◯  Ellipse", "Shift+M", Tool::EllipseSelect},
                                              {"L  Lasso", "L", Tool::Lasso},
@@ -175,14 +262,31 @@ void Window::tools() {
     auto *options = addToolBar("Tool options");
     options->setObjectName("toolOptions");
     options->setMovable(false);
-    options->addWidget(new QLabel("  PIXEL STUDIO    "));
+    options->addWidget(new QLabel("  PHOTOSHIP    "));
+    auto *pressureSize = new QCheckBox("Pressure size");
+    pressureSize->setObjectName("pressureSize");
+    pressureSize->setChecked(true);
+    options->addWidget(pressureSize);
+    auto *pressureOpacity = new QCheckBox("Pressure opacity");
+    pressureOpacity->setObjectName("pressureOpacity");
+    pressureOpacity->setChecked(true);
+    options->addWidget(pressureOpacity);
+    auto syncPressure = [this, pressureSize, pressureOpacity] {
+        for (int i = 0; i < tabs->count(); ++i) {
+            auto *c = qobject_cast<Canvas *>(tabs->widget(i));
+            c->pressureSize = pressureSize->isChecked();
+            c->pressureOpacity = pressureOpacity->isChecked();
+        }
+    };
+    connect(pressureSize, &QCheckBox::toggled, this, syncPressure);
+    connect(pressureOpacity, &QCheckBox::toggled, this, syncPressure);
     colorButton = new QPushButton;
     colorButton->setMinimumWidth(95);
     colorButton->setObjectName("foregroundColor");
     options->addWidget(colorButton);
     connect(colorButton, &QPushButton::clicked, this, [this]() {
-        setColor(
-            QColorDialog::getColor(foreground, this, "Foreground color", QColorDialog::ShowAlphaChannel));
+        setColor(QColorDialog::getColor(foreground, this, ui("Foreground color"),
+                                        QColorDialog::ShowAlphaChannel | QColorDialog::DontUseNativeDialog));
     });
     setColor(foreground);
     options->addSeparator();
@@ -230,7 +334,8 @@ void Window::panels() {
     auto *form = new QFormLayout;
     blend = new QComboBox;
     blend->setObjectName("blendMode");
-    blend->addItems(Document::blendModes());
+    for (const auto &mode : Document::blendModes())
+        blend->addItem(mode, mode);
     form->addRow("Blend", blend);
     opacity = new QDoubleSpinBox;
     opacity->setRange(0, 100);
@@ -239,11 +344,23 @@ void Window::panels() {
     opacity->setObjectName("layerOpacity");
     form->addRow("Opacity", opacity);
     layout->addLayout(form);
-    layers = new QTreeWidget;
+    auto *tree = new LayerTree;
+    layers = tree;
+    tree->moveLayers = [this](QStringList ids, QString parent, QString before) {
+        QString session = currentDocument() ? currentDocument()->recoveryPath : QString();
+        QTimer::singleShot(0, this, [this, ids, parent, before, session] {
+            if (!currentDocument() || currentDocument()->recoveryPath != session)
+                return;
+            currentCanvas()->abortGesture();
+            run([&](Document *d, QString *e) { return d->dropLayers(ids, parent, before, e); });
+        });
+    };
+    layers->setDragDropMode(QAbstractItemView::InternalMove);
+    layers->setDefaultDropAction(Qt::MoveAction);
     layers->setObjectName("layerTree");
     layers->setHeaderHidden(true);
     layers->setIconSize(QSize(38, 30));
-    layers->setSelectionMode(QAbstractItemView::SingleSelection);
+    layers->setSelectionMode(QAbstractItemView::ExtendedSelection);
     layout->addWidget(layers);
     auto *buttons = new QHBoxLayout;
     auto button = [&](const QString &name, const std::function<void()> &callback) {
@@ -290,7 +407,8 @@ void Window::panels() {
         if (d && d->active())
             d->edit("Toggle mask", [&]() { d->active()->maskEnabled = on; });
     });
-    connect(blend, &QComboBox::currentTextChanged, this, [this](const QString &value) {
+    connect(blend, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) {
+        const QString value = blend->currentData().toString();
         if (syncing)
             return;
         auto *d = currentDocument();
@@ -304,17 +422,24 @@ void Window::panels() {
         if (d && d->active() && d->active()->opacity != opacity->value() / 100)
             d->edit("Layer opacity", [&]() { d->active()->opacity = opacity->value() / 100; });
     });
-    connect(layers, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem *item, QTreeWidgetItem *) {
-        if (syncing || !item)
+    connect(layers, &QTreeWidget::itemSelectionChanged, this, [this] {
+        if (syncing || !currentDocument())
             return;
-        if (currentCanvas())
+        QStringList ids;
+        for (auto *item : layers->selectedItems())
+            ids << item->data(0, Qt::UserRole).toString();
+        QString active =
+            layers->currentItem() ? layers->currentItem()->data(0, Qt::UserRole).toString() : QString();
+        QString session = currentDocument()->recoveryPath;
+        // Rebuilding the tree inside its selection signal destroys items still in use by Qt.
+        QTimer::singleShot(0, this, [this, ids, active, session] {
+            auto *d = currentDocument();
+            if (!d || d->recoveryPath != session)
+                return;
             currentCanvas()->abortGesture();
-        auto *d = currentDocument();
-        if (d) {
-            d->state.active = item->data(0, Qt::UserRole).toString();
             currentCanvas()->maskTarget = false;
-            refresh();
-        }
+            d->setSelected(ids, active);
+        });
     });
     connect(layers, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem *item, int) {
         if (syncing)
@@ -381,26 +506,30 @@ void Window::panels() {
         if (d->active()->kind == "text")
             editText();
         else if (d->active()->kind == "shape") {
-            QColor color = QColorDialog::getColor(d->active()->color, this, "Shape color",
-                                                  QColorDialog::ShowAlphaChannel);
+            QColor color =
+                QColorDialog::getColor(d->active()->color, this, ui("Shape color"),
+                                       QColorDialog::ShowAlphaChannel | QColorDialog::DontUseNativeDialog);
             if (color.isValid())
                 d->edit("Shape color", [&]() { d->active()->color = color; });
         } else
-            statusBar()->showMessage("Select a text or shape layer.", 5000);
+            statusBar()->showMessage(ui("Select a text or shape layer."), 5000);
     });
 }
 void Window::menus() {
     auto *file = menuBar()->addMenu("&File");
     file->addAction(action("&New…", QKeySequence::New, [this]() { newDialog(); }));
     file->addAction(action("&Open image / project…", QKeySequence::Open, [this]() {
-        QString path = QFileDialog::getOpenFileName(
-            this, "Open image or project", {},
-            "Images / Project manifest (*.png *.jpg *.jpeg *.bmp *.webp manifest.json);;All files (*)");
+        QString path = QFileDialog::getOpenFileName(this, ui("Open image or project"), {},
+                                                    ui("Images / PSD / Project manifest (*.png *.jpg *.jpeg "
+                                                       "*.bmp *.webp *.psd manifest.json);;All files (*)"),
+                                                    nullptr, QFileDialog::DontUseNativeDialog);
         if (!path.isEmpty())
             openPath(path);
     }));
     file->addAction(action("Open project folder…", {}, [this]() {
-        QString path = QFileDialog::getExistingDirectory(this, "Open .psproj or .comp folder");
+        QString path =
+            QFileDialog::getExistingDirectory(this, ui("Open .psproj or .comp folder"), {},
+                                              QFileDialog::ShowDirsOnly | QFileDialog::DontUseNativeDialog);
         if (!path.isEmpty())
             openPath(path);
     }));
@@ -490,6 +619,18 @@ void Window::menus() {
         if (d && d->active() && !d->active()->isGroup())
             d->edit("Flip layer", [&]() { d->active()->flipY = !d->active()->flipY; });
     }));
+    layer->addAction(action("Merge selected layers", QKeySequence("Ctrl+E"),
+                            [this] { run([](Document *d, QString *e) { return d->mergeSelected(e); }); }));
+    layer->addAction(action("Toggle clipping mask", QKeySequence("Ctrl+Alt+G"), [this] {
+        auto *d = currentDocument();
+        if (d && d->active() && !d->active()->isGroup() && d->active()->kind != "adjustment")
+            d->edit("Clipping mask", [&] { d->active()->clipped = !d->active()->clipped; });
+    }));
+    layer->addAction(action("Edit adjustment layer…", {}, [this] {
+        auto *d = currentDocument();
+        if (d && d->active() && d->active()->kind == "adjustment")
+            adjustDialog(d->active()->adjustment);
+    }));
     auto *select = menuBar()->addMenu("&Select");
     select->addAction(action("All", QKeySequence::SelectAll, [this]() {
         if (currentDocument()) {
@@ -534,6 +675,7 @@ void Window::menus() {
         form.addRow(&buttons);
         connect(&buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
         connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        translateWidgets(&dialog);
         if (dialog.exec() == QDialog::Accepted) {
             QSize size(w.value(), h.value());
             if (!Document::validSize(size)) {
@@ -574,21 +716,34 @@ void Window::menus() {
     view->addSeparator();
     for (auto *dock : findChildren<QDockWidget *>())
         view->addAction(dock->toggleViewAction());
+    auto *languages = menuBar()->addMenu("Language / 语言");
+    languages->setObjectName("languageMenu");
+    auto *languageGroup = new QActionGroup(this);
+    languageGroup->setExclusive(true);
+    for (const auto &code : languageCodes()) {
+        auto *choice = languages->addAction(languageName(code));
+        choice->setProperty("languageCode", code);
+        choice->setCheckable(true);
+        choice->setChecked(code == currentLanguage());
+        languageGroup->addAction(choice);
+        connect(choice, &QAction::triggered, this, [code] { setLanguage(code); });
+    }
     auto *help = menuBar()->addMenu("&Help");
     help->addAction(action("Quick guide", QKeySequence("F1"), [this]() {
         QMessageBox::information(
             this, "Quick guide",
-            "B / E: brush / eraser. [ / ]: brush size.\nV: move; drag the lower-right handle to scale.\nM / "
-            "Shift+M / L / W: selections; Shift adds, Alt subtracts.\nC: drag to crop. U / Shift+U: shapes. "
-            "T: editable text.\nWheel: zoom at pointer. Space / middle button: pan. Esc: cancel stroke or "
-            "drag.\nLayer menu: masks, rasterize, flip. Properties: exact transform and grouping.\nEdit "
-            "mask: paint grayscale; black hides, white reveals.\nCtrl+S saves an editable .psproj folder. "
-            "Ctrl+Shift+E exports a flattened image.\n8-bit sRGB, 16 million canvas pixels, 32 million "
-            "source pixels.\nPSD, RAW, adjustment layers, and AI selection are not included in v0.1.");
+            ui("B / E: brush / eraser. [ / ]: brush size. V: move or scale.\n"
+               "M / Shift+M / L / W: selections; Shift adds, Alt subtracts. C: crop.\n"
+               "U / Shift+U: shapes. T: text. S / J: clone / heal; Alt-click sets the source.\n"
+               "Wheel: zoom. Space / middle button: pan. Esc: cancel.\n"
+               "Layer menu: masks, clipping, merge. Image menu: adjustment layers.\n"
+               "Ctrl+S: save .psproj. Ctrl+Shift+E: export PNG / JPEG.\n"
+               "PSD import: 8-bit RGB with a compatibility report. RAW and AI selection are unavailable.\n"
+               "Limits: 16 million canvas pixels, 32 million source pixels, 256 layers."));
     }));
     help->addAction(action("Open demo document", {}, [this]() { demo(); }));
     help->addAction(action("About", {}, [this]() {
-        QMessageBox::about(this, "Pixel Studio 0.1.0",
+        QMessageBox::about(this, "PhotoShip 0.2.1",
                            "A cross-platform, layer-based image editor built with Qt 6 and C++.\nCompositor "
                            "algorithms used under the MIT license.\nQt is dynamically linked; see "
                            "THIRD_PARTY_NOTICES.md.\nThis application is independent of Adobe Photoshop.");
@@ -601,19 +756,21 @@ void Window::refresh() {
     for (int i = 0; i < tabs->count(); ++i) {
         auto *c = qobject_cast<Canvas *>(tabs->widget(i));
         auto *d = c->document;
-        QString title = d->filePath.isEmpty() ? "Untitled" : QFileInfo(d->filePath).completeBaseName();
-        tabs->setTabText(i, title + (d->dirty() ? " *" : ""));
+        QString title = d->filePath.isEmpty() ? ui("Untitled") : QFileInfo(d->filePath).completeBaseName();
+        tabs->setTabText(i, title + (d->dirty() ? " *" : "") + (d->saving ? ui(" [saving]") : QString()));
     }
     auto *d = currentDocument();
     layers->clear();
     parentGroup->clear();
-    parentGroup->addItem("None", QString());
+    parentGroup->addItem(ui("None"), QString());
     QMap<QString, QTreeWidgetItem *> items;
     if (d) {
         for (const auto &l : d->state.layers) {
             auto *item = new QTreeWidgetItem;
             item->setData(0, Qt::UserRole, l.id);
+            item->setData(0, Qt::UserRole + 1, l.isGroup());
             item->setText(0, l.name);
+            item->setToolTip(0, ui(l.kind) + (l.clipped ? ui(" • clipped to base alpha") : QString()));
             item->setFlags(item->flags() | Qt::ItemIsEditable | Qt::ItemIsUserCheckable);
             item->setCheckState(0, l.visible ? Qt::Checked : Qt::Unchecked);
             if (!l.parent.isEmpty() && items.contains(l.parent))
@@ -623,6 +780,8 @@ void Window::refresh() {
             items[l.id] = item;
             if (l.isGroup())
                 item->setIcon(0, style()->standardIcon(QStyle::SP_DirIcon));
+            else if (l.kind == "adjustment")
+                item->setIcon(0, style()->standardIcon(QStyle::SP_FileDialogDetailedView));
             else {
                 QImage thumb = l.pixels().scaled(38, 30, Qt::KeepAspectRatio, Qt::SmoothTransformation);
                 item->setIcon(0, QIcon(QPixmap::fromImage(thumb)));
@@ -630,7 +789,10 @@ void Window::refresh() {
             item->setExpanded(true);
         }
         if (items.contains(d->state.active))
-            layers->setCurrentItem(items[d->state.active]);
+            layers->setCurrentItem(items[d->state.active], 0, QItemSelectionModel::NoUpdate);
+        auto selected = d->selectedRoots();
+        for (auto it = items.begin(); it != items.end(); ++it)
+            it.value()->setSelected(selected.contains(it.key()));
     }
     Layer *l = d ? d->active() : nullptr;
     bool enabled = l != nullptr;
@@ -638,12 +800,12 @@ void Window::refresh() {
                        static_cast<QWidget *>(layerWidth), static_cast<QWidget *>(layerHeight),
                        static_cast<QWidget *>(rotation), static_cast<QWidget *>(parentGroup)})
         w->setEnabled(enabled);
-    blend->setEnabled(enabled && !l->isGroup());
+    blend->setEnabled(enabled && !l->isGroup() && l->kind != "adjustment");
     maskTarget->setEnabled(enabled && !l->isGroup());
     maskEnabled->setEnabled(enabled && !l->mask.isNull());
     if (l) {
         opacity->setValue(l->opacity * 100);
-        blend->setCurrentText(l->blend);
+        blend->setCurrentIndex(blend->findData(l->blend));
         x->setValue(l->position.x());
         y->setValue(l->position.y());
         layerWidth->setValue(l->size.width());
@@ -660,22 +822,23 @@ void Window::refresh() {
     }
     maskTarget->setChecked(currentCanvas() && currentCanvas()->maskTarget);
     if (d) {
-        details->setText(QString("%1 × %2 px  •  8-bit sRGB\n%3 layers  •  %4 MP source pixels\n%5\n\nSelect "
-                                 "a layer to edit its properties.")
+        details->setText(ui("%1 × %2 px  •  8-bit sRGB\n%3 layers  •  %4 MP source pixels\n%5\n\nSelect "
+                            "a layer to edit its properties.")
                              .arg(d->state.size.width())
                              .arg(d->state.size.height())
                              .arg(d->state.layers.size())
                              .arg(d->pixelCount() / 1000000.0, 0, 'f', 1)
-                             .arg(l ? l->kind.toUpper() : "No active layer"));
-        setWindowTitle(tabs->tabText(tabs->currentIndex()) + " — Pixel Studio");
+                             .arg(ui(l ? l->kind : "No active layer")));
+        setWindowTitle(tabs->tabText(tabs->currentIndex()) + " — PhotoShip");
     } else {
-        details->setText("Create or open a document to begin.");
-        setWindowTitle("Pixel Studio");
+        details->setText(ui("Create or open a document to begin."));
+        setWindowTitle("PhotoShip");
     }
     undoAction->setEnabled(d && !d->past.isEmpty());
     redoAction->setEnabled(d && !d->future.isEmpty());
-    undoAction->setText(d && !d->past.isEmpty() ? "Undo " + d->past.last().label : "Undo");
-    redoAction->setText(d && !d->future.isEmpty() ? "Redo " + d->future.last().label : "Redo");
+    undoAction->setText(d && !d->past.isEmpty() ? ui("Undo %1").arg(ui(d->past.last().label)) : ui("Undo"));
+    redoAction->setText(d && !d->future.isEmpty() ? ui("Redo %1").arg(ui(d->future.last().label))
+                                                  : ui("Redo"));
     syncing = false;
 }
 void Window::transformChanged() {
@@ -732,6 +895,7 @@ void Window::newDialog() {
     layout.addRow(&buttons);
     connect(&buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    translateWidgets(&dialog);
     if (dialog.exec() == QDialog::Accepted)
         newDocument(QSize(w.value(), h.value()));
 }
@@ -755,8 +919,48 @@ bool Window::openPath(const QString &path) {
         if (currentDocument()->filePath.isEmpty()) {
             currentDocument()->revision = 1;
             currentDocument()->notify();
-            statusBar()->showMessage("Compositor project imported. Save as a new .psproj project.", 8000);
+            statusBar()->showMessage(ui("Compositor project imported. Save as a new .psproj project."), 8000);
         }
+        return true;
+    }
+    if (info.suffix().compare("psd", Qt::CaseInsensitive) == 0) {
+        State state;
+        QStringList report;
+        if (!readPsd(path, state, report, errorMessage)) {
+            error(errorMessage);
+            return false;
+        }
+        QDialog dialog(this);
+        dialog.setWindowTitle("PSD compatibility report");
+        dialog.resize(640, 460);
+        QVBoxLayout layout(&dialog);
+        QLabel summary(ui(report.value(0)));
+        summary.setWordWrap(true);
+        layout.addWidget(&summary);
+        QTextEdit details;
+        details.setReadOnly(true);
+        details.setPlainText(
+            report.mid(1).isEmpty()
+                ? ui("All layer features recognized by this importer. Save the imported document as .psproj.")
+                : [&report] {
+                      QStringList translated;
+                      for (const auto &line : report.mid(1))
+                          translated << ui(line);
+                      return translated.join("\n\n");
+                  }());
+        layout.addWidget(&details);
+        QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+        buttons.button(QDialogButtonBox::Ok)->setText("Import");
+        layout.addWidget(&buttons);
+        connect(&buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+        connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        translateWidgets(&dialog);
+        if (dialog.exec() != QDialog::Accepted)
+            return false;
+        Document d;
+        d.state = std::move(state);
+        d.revision = 1;
+        addDocument(std::move(d));
         return true;
     }
     QImage image;
@@ -778,10 +982,13 @@ bool Window::openPath(const QString &path) {
 void Window::importImages(const QStringList &provided) {
     QStringList paths = provided;
     if (paths.isEmpty())
-        paths = QFileDialog::getOpenFileNames(this, "Import images", {},
-                                              "Images (*.png *.jpg *.jpeg *.bmp *.webp);;All files (*)");
+        paths = QFileDialog::getOpenFileNames(
+            this, ui("Import images"), {},
+            ui("Images / PSD (*.png *.jpg *.jpeg *.bmp *.webp *.psd);;All files (*)"), nullptr,
+            QFileDialog::DontUseNativeDialog);
     for (const auto &path : paths) {
-        if (QFileInfo(path).isDir() || QFileInfo(path).fileName() == "manifest.json") {
+        if (QFileInfo(path).isDir() || QFileInfo(path).fileName() == "manifest.json" ||
+            QFileInfo(path).suffix().compare("psd", Qt::CaseInsensitive) == 0) {
             openPath(path);
             continue;
         }
@@ -806,35 +1013,78 @@ bool Window::save(bool saveAs) {
         return false;
     QString path = d->filePath;
     if (saveAs || path.isEmpty()) {
-        path = QFileDialog::getSaveFileName(this, "Save project directory",
-                                            path.isEmpty() ? "Untitled.psproj" : path,
-                                            "Pixel Studio project (*.psproj)");
+        path = QFileDialog::getSaveFileName(
+            this, ui("Save project directory"), path.isEmpty() ? "Untitled.psproj" : path,
+            ui("PhotoShip project (*.psproj)"), nullptr, QFileDialog::DontUseNativeDialog);
         if (path.isEmpty())
             return false;
         if (!path.endsWith(".psproj", Qt::CaseInsensitive))
             path += ".psproj";
     }
-    QString message;
-    if (!saveProject(path, d->state, message)) {
-        error(message);
+    if (d->saving) {
+        statusBar()->showMessage(ui("This document is already saving. Editing can continue."), 5000);
         return false;
     }
-    d->filePath = QFileInfo(path).absoluteFilePath();
-    d->markSaved();
-    statusBar()->showMessage("Project saved", 5000);
+    const State snapshot = d->state;
+    const quint64 revision = d->revision;
+    const QString recovery = d->recoveryPath;
+    d->saving = true;
+    statusBar()->showMessage(ui("Saving project in background…"));
+    refresh();
+    persistence->submit(
+        [path, snapshot] {
+            QString error;
+            bool ok = saveProject(path, snapshot, error);
+            return JobResult{ok, error};
+        },
+        [this, path, revision, recovery](JobResult result) {
+            Document *d = nullptr;
+            for (const auto &entry : documents)
+                if (entry->recoveryPath == recovery)
+                    d = entry.get();
+            if (!d)
+                return;
+            d->saving = false;
+            if (!result.ok) {
+                closeAfterSave.remove(d);
+                closeWindowAfterSave = false;
+                error(result.error);
+                refresh();
+                return;
+            }
+            d->filePath = QFileInfo(path).absoluteFilePath();
+            d->lastChange = {};
+            d->markSaved(revision);
+            if (!d->dirty())
+                clearRecovery(d);
+            statusBar()->showMessage(
+                ui(d->dirty() ? "Snapshot saved; newer edits still need saving." : "Project saved"), 6000);
+            if (closeAfterSave.remove(d) && !d->dirty())
+                for (int i = 0; i < tabs->count(); ++i)
+                    if (qobject_cast<Canvas *>(tabs->widget(i))->document == d) {
+                        closeTab(i);
+                        break;
+                    }
+            if (closeWindowAfterSave) {
+                closeWindowAfterSave = false;
+                close();
+            }
+        });
     return true;
 }
+
 void Window::exportDialog() {
     auto *d = currentDocument();
     if (!d)
         return;
     QString selected;
-    QString path = QFileDialog::getSaveFileName(this, "Export flattened image", "Untitled.png",
-                                                "PNG image (*.png);;JPEG image (*.jpg)", &selected);
+    QString path = QFileDialog::getSaveFileName(this, ui("Export flattened image"), "Untitled.png",
+                                                ui("PNG image (*.png);;JPEG image (*.jpg)"), &selected,
+                                                QFileDialog::DontUseNativeDialog);
     if (path.isEmpty())
         return;
     if (QFileInfo(path).suffix().isEmpty())
-        path += selected.startsWith("JPEG") ? ".jpg" : ".png";
+        path += selected.contains("*.jpg") ? ".jpg" : ".png";
     int quality = 95;
     if (QStringList{"jpg", "jpeg"}.contains(QFileInfo(path).suffix().toLower())) {
         bool ok = false;
@@ -843,14 +1093,30 @@ void Window::exportDialog() {
         if (!ok)
             return;
     }
-    QString message;
-    if (!exportImage(path, d->composite(), quality, message)) {
-        error(message);
-        return;
-    }
-    statusBar()->showMessage("Image exported. Project save status is unchanged.", 6000);
+    State snapshot = d->state;
+    statusBar()->showMessage(ui("Exporting image in background…"));
+    persistence->submit(
+        [path, quality, snapshot] {
+            Document copy;
+            copy.state = snapshot;
+            QString error;
+            bool ok = exportImage(path, copy.composite(), quality, error);
+            return JobResult{ok, error};
+        },
+        [this](JobResult result) {
+            if (!result.ok)
+                error(result.error);
+            else
+                statusBar()->showMessage(ui("Image exported. Project save status is unchanged."), 6000);
+        });
 }
+
 bool Window::confirmClose(Document *d) {
+    if (d->saving) {
+        statusBar()->showMessage(ui("Saving is still running; this document will close after saving."), 5000);
+        closeAfterSave.insert(d);
+        return false;
+    }
     if (!d->dirty())
         return true;
     auto choice = QMessageBox::question(this, "Unsaved changes", "Save changes before closing this document?",
@@ -858,8 +1124,12 @@ bool Window::confirmClose(Document *d) {
                                         QMessageBox::Save);
     if (choice == QMessageBox::Cancel)
         return false;
-    if (choice == QMessageBox::Save)
-        return save();
+    if (choice == QMessageBox::Save) {
+        if (save())
+            closeAfterSave.insert(d);
+        return false;
+    }
+    clearRecovery(d);
     return true;
 }
 void Window::closeTab(int i) {
@@ -871,7 +1141,10 @@ void Window::closeTab(int i) {
     auto *d = c->document;
     if (!confirmClose(d))
         return;
+    clearRecovery(d);
     d->changed = {};
+    d->regionChanged = {};
+    closeAfterSave.remove(d);
     tabs->removeTab(i);
     delete c;
     documents.erase(
@@ -884,10 +1157,14 @@ void Window::closeEvent(QCloseEvent *e) {
         tabs->setCurrentIndex(i);
         currentCanvas()->abortGesture();
         if (!confirmClose(currentDocument())) {
+            closeWindowAfterSave = currentDocument()->saving;
             e->ignore();
             return;
         }
     }
+    for (const auto &d : documents)
+        clearRecovery(d.get());
+    persistence->wait();
     e->accept();
 }
 void Window::editText(QPointF at) {
@@ -903,7 +1180,7 @@ void Window::editText(QPointF at) {
     QVBoxLayout layout(&dialog);
     QTextEdit text;
     text.setAcceptRichText(false);
-    text.setPlainText(editing ? d->active()->text : "Your text");
+    text.setPlainText(editing ? d->active()->text : ui("Your text"));
     layout.addWidget(&text);
     QFontComboBox family;
     family.setCurrentFont(editing ? d->active()->font : QFont("Sans Serif"));
@@ -921,7 +1198,8 @@ void Window::editText(QPointF at) {
     QPushButton colorEdit("Text color…");
     layout.addWidget(&colorEdit);
     connect(&colorEdit, &QPushButton::clicked, &dialog, [&]() {
-        QColor picked = QColorDialog::getColor(color, &dialog, "Text color");
+        QColor picked =
+            QColorDialog::getColor(color, &dialog, ui("Text color"), QColorDialog::DontUseNativeDialog);
         if (picked.isValid())
             color = picked;
     });
@@ -929,6 +1207,7 @@ void Window::editText(QPointF at) {
     layout.addWidget(&buttons);
     connect(&buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    translateWidgets(&dialog);
     if (dialog.exec() != QDialog::Accepted)
         return;
     if (text.toPlainText().size() > 100000) {
@@ -956,7 +1235,7 @@ void Window::editText(QPointF at) {
 void Window::maskAction(const QString &name) {
     auto *d = currentDocument();
     if (!d || !d->active() || d->active()->isGroup()) {
-        statusBar()->showMessage("Select a non-group layer for a mask.", 5000);
+        statusBar()->showMessage(ui("Select a non-group layer for a mask."), 5000);
         return;
     }
     auto *l = d->active();
@@ -994,13 +1273,15 @@ void Window::maskAction(const QString &name) {
 }
 void Window::adjustDialog(const QString &kind) {
     auto *d = currentDocument();
-    if (!d || !d->active() || d->active()->kind != "raster") {
-        statusBar()->showMessage("Select a raster layer. Rasterize text or shapes before pixel adjustments.",
-                                 6000);
+    if (!d || !d->active()) {
+        statusBar()->showMessage(
+            ui("Select a raster layer. Rasterize text or shapes before pixel adjustments."), 6000);
         return;
     }
+    bool editing = d->active()->kind == "adjustment";
     if (kind == "Invert") {
-        d->adjust(kind, 0, 0, 0);
+        if (!editing)
+            run([&](Document *d, QString *e) { return d->addAdjustment(kind, 0, 0, 0, {}, e); });
         return;
     }
     QDialog dialog(this);
@@ -1033,13 +1314,30 @@ void Window::adjustDialog(const QString &kind) {
         note.setWordWrap(true);
         layout.addRow(&note);
     }
-    QLabel note("Applies to the selected raster layer and respects the selection. Undo is available.");
+    if (editing) {
+        first.setValue(d->active()->first);
+        second.setValue(d->active()->second);
+        third.setValue(d->active()->third);
+        QStringList points;
+        for (auto p : d->active()->curve)
+            points << QString("%1,%2").arg(p.x() * 255).arg(p.y() * 255);
+        if (!points.isEmpty())
+            curve.setPlainText(points.join("\n"));
+    }
+    QCheckBox destructive("Apply directly to raster pixels");
+    destructive.setEnabled(!editing && d->active()->kind == "raster");
+    layout.addRow(&destructive);
+    QLabel note(
+        editing
+            ? "Edit this adjustment layer's parameters."
+            : "Creates an editable adjustment layer above the active layer. A selection becomes its mask.");
     note.setWordWrap(true);
     layout.addRow(&note);
     QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
     layout.addRow(&buttons);
     connect(&buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    translateWidgets(&dialog);
     if (dialog.exec() != QDialog::Accepted)
         return;
     if (kind == "Levels" && first.value() >= third.value()) {
@@ -1064,7 +1362,20 @@ void Window::adjustDialog(const QString &kind) {
             return;
         }
     }
-    d->adjust(kind, first.value(), second.value(), third.value(), points);
+    if (editing)
+        d->edit("Edit adjustment", [&] {
+            auto *l = d->active();
+            l->first = first.value();
+            l->second = second.value();
+            l->third = third.value();
+            l->curve = points;
+        });
+    else if (destructive.isChecked())
+        d->adjust(kind, first.value(), second.value(), third.value(), points);
+    else
+        run([&](Document *d, QString *e) {
+            return d->addAdjustment(kind, first.value(), second.value(), third.value(), points, e);
+        });
 }
 void Window::demo() {
     Document d = Document::create(QSize(1200, 800));
@@ -1092,5 +1403,115 @@ void Window::demo() {
 }
 bool Window::writeScreenshot(const QString &path) {
     return grab().save(path, "PNG");
+}
+} // namespace ps
+
+namespace ps {
+void Window::snapshotRecovery() {
+    for (const auto &entry : documents) {
+        auto *d = entry.get();
+        QString path = d->recoveryPath;
+        if (!d->dirty() || d->isEditing() || recovering.contains(path) ||
+            (recoveredRevision.contains(path) && recoveredRevision[path] == d->revision))
+            continue;
+        State snapshot = d->state;
+        QString original = d->filePath;
+        quint64 revision = d->revision;
+        recovering.insert(path);
+        persistence->submit(
+            [path, snapshot, original, revision] {
+                QString error;
+                bool ok = saveRecovery(path, snapshot, original, revision, error);
+                return JobResult{ok, error};
+            },
+            [this, path, revision](JobResult result) {
+                recovering.remove(path);
+                bool open = false;
+                for (const auto &d : documents)
+                    if (d->recoveryPath == path)
+                        open = true;
+                if (!open)
+                    return;
+                if (result.ok)
+                    recoveredRevision[path] = revision;
+                else
+                    statusBar()->showMessage(ui("Recovery save failed: " + result.error), 10000);
+            });
+    }
+}
+void Window::clearRecovery(Document *d) {
+    QString path = d->recoveryPath;
+    recoveredRevision.remove(path);
+    persistence->submit([path] { return JobResult{removeRecovery(path), {}}; });
+}
+void Window::recoverDocuments() {
+    QDir root(recoveryDirectory());
+    auto paths = root.entryList({"*.psproj"}, QDir::Dirs | QDir::NoDotAndDotDot, QDir::Time);
+    if (paths.isEmpty())
+        return;
+    QDialog dialog(this);
+    dialog.setWindowTitle("Recover unsaved documents");
+    dialog.resize(560, 360);
+    QVBoxLayout layout(&dialog);
+    QLabel note("Recovery snapshots were found. Restore opens separate unsaved documents and preserves the "
+                "original projects.");
+    note.setWordWrap(true);
+    layout.addWidget(&note);
+    QTreeWidget list;
+    list.setHeaderLabels({"Recovery snapshot", "Original project"});
+    layout.addWidget(&list);
+    for (auto name : paths) {
+        QString path = root.filePath(name);
+        if (QFileInfo(path).isSymLink())
+            continue;
+        QFile metadata(QDir(path).filePath("recovery.json"));
+        QJsonObject obj;
+        if (metadata.open(QIODevice::ReadOnly) && metadata.size() < 16384)
+            obj = QJsonDocument::fromJson(metadata.readAll()).object();
+        auto *item = new QTreeWidgetItem(
+            &list, {obj["savedAt"].toString(name), obj["originalPath"].toString("Untitled")});
+        item->setData(0, Qt::UserRole, path);
+        item->setCheckState(0, Qt::Checked);
+    }
+    auto *buttons = new QDialogButtonBox;
+    auto *restore = buttons->addButton("Restore checked", QDialogButtonBox::AcceptRole);
+    auto *discard = buttons->addButton("Discard checked", QDialogButtonBox::DestructiveRole);
+    buttons->addButton("Keep for later", QDialogButtonBox::RejectRole);
+    layout.addWidget(buttons);
+    int choice = 0;
+    connect(restore, &QPushButton::clicked, &dialog, [&] {
+        choice = 1;
+        dialog.accept();
+    });
+    connect(discard, &QPushButton::clicked, &dialog, [&] {
+        choice = 2;
+        dialog.accept();
+    });
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    translateWidgets(&dialog);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+    for (int i = 0; i < list.topLevelItemCount(); ++i) {
+        auto *item = list.topLevelItem(i);
+        if (item->checkState(0) != Qt::Checked)
+            continue;
+        QString path = item->data(0, Qt::UserRole).toString();
+        if (choice == 2) {
+            removeRecovery(path);
+            continue;
+        }
+        State state;
+        QString original, message;
+        if (!loadRecovery(path, state, original, message)) {
+            error(message);
+            continue;
+        }
+        Document d;
+        d.state = std::move(state);
+        d.recoveryPath = path;
+        d.revision = 1;
+        addDocument(std::move(d));
+        statusBar()->showMessage(ui("Recovered snapshot. Save As to preserve it."), 10000);
+    }
 }
 } // namespace ps

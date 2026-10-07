@@ -19,7 +19,10 @@ struct Layer {
     QString parent;
     QString kind = "raster";
     QImage image, mask;
-    bool visible = true, maskEnabled = true;
+    bool visible = true, maskEnabled = true, clipped = false;
+    QString adjustment = "Levels";
+    double first = 0, second = 1, third = 255;
+    QVector<QPointF> curve;
     bool flipX = false, flipY = false, nearest = false;
     double opacity = 1;
     QString blend = "Normal";
@@ -34,7 +37,7 @@ struct Layer {
         return kind == "group";
     }
     QTransform transform() const;
-    QImage pixels() const;
+    QImage pixels(QRect region = {}) const;
 };
 struct State {
     QSize size = QSize(1280, 800);
@@ -43,11 +46,19 @@ struct State {
     QVector<Layer> layers;
     QString active;
     QPainterPath selection;
+    QStringList selected;
+};
+struct PixelPatch {
+    QRect bounds;
+    QImage before, after;
 };
 struct HistoryEntry {
     State state;
     QString label;
-    quint64 revision;
+    quint64 revision = 0, afterRevision = 0;
+    QString layerID;
+    bool stroke = false, mask = false, createdMask = false;
+    QVector<PixelPatch> patches;
 };
 class Document {
   public:
@@ -56,6 +67,10 @@ class Document {
     quint64 revision = 0, savedRevision = 0;
     QVector<HistoryEntry> past, future;
     std::function<void()> changed;
+    std::function<void(QRect)> regionChanged;
+    QRect lastChange;
+    bool saving = false;
+    QString recoveryPath;
     static Document create(QSize size);
     Layer *active();
     const Layer *active() const;
@@ -64,6 +79,7 @@ class Document {
     QStringList descendants(const QString &id) const;
     qint64 pixelCount() const;
     void begin(const QString &label);
+    void beginStroke(const QString &label, bool mask);
     void commit();
     void cancel();
     void edit(const QString &label, const std::function<void()> &operation);
@@ -76,6 +92,14 @@ class Document {
         savedRevision = revision;
         notify();
     }
+    void markSaved(quint64 saved) {
+        savedRevision = saved;
+        notify();
+    }
+    bool isEditing() const {
+        return editing;
+    }
+    qint64 historyBytes() const;
     void notify() {
         if (changed)
             changed();
@@ -89,15 +113,26 @@ class Document {
     void remove();
     void reorder(int direction);
     void reparent(const QString &parent);
+    QStringList selectedRoots() const;
+    QStringList selectedMembers() const;
+    void setSelected(QStringList ids, QString active = {});
+    bool dropLayers(QStringList ids, QString parent, QString before, QString *error = nullptr);
+    bool mergeSelected(QString *error = nullptr);
+    bool moveSelection(QPointF delta, bool copy, QString *error = nullptr);
     void crop(QRect bounds);
     void paint(QPointF from, QPointF to, double diameter, QColor color, double opacity, bool erase,
                bool mask);
     void fill(QColor color, bool mask);
+    void repair(QPointF from, QPointF to, QPointF offset, double diameter, double opacity, bool heal,
+                const QImage &source);
+    bool addAdjustment(QString kind, double first, double second, double third, QVector<QPointF> curve = {},
+                       QString *error = nullptr);
     bool magicWand(QPoint point, int tolerance, bool add, bool subtract, QString *error = nullptr);
     void adjust(const QString &kind, double first, double second, double third,
                 const QVector<QPointF> &curve = {});
     QImage composite() const;
-    void render(QPainter &painter) const;
+    QImage compositeTile(QRect region) const;
+    void render(QPainter &painter, QRect region = {}) const;
     static QStringList blendModes();
     static bool validSize(QSize size, qint64 budget = MaxCanvasPixels);
 
@@ -106,9 +141,12 @@ class Document {
     bool editing = false;
     quint64 nextRevision = 1;
     void trimHistory();
+    void applyPatches(const HistoryEntry &entry, bool after);
+    void captureTiles(QImage &target, QRect bounds);
     bool canAdd(qint64 pixels, int count, QString *error) const;
     void insert(Layer layer);
 };
+QImage adjustedImage(const QImage &source, const Layer &adjustment);
 bool loadProject(const QString &path, State &result, QString &error);
 bool saveProject(const QString &path, const State &state, QString &error);
 bool readImage(const QString &path, QImage &result, QString &error);

@@ -1,5 +1,6 @@
 #pragma once
 #include "document.h"
+#include <QCache>
 #include <QWidget>
 #include <functional>
 namespace ps {
@@ -7,6 +8,8 @@ enum class Tool {
     Move,
     Brush,
     Eraser,
+    Clone,
+    Heal,
     RectangleSelect,
     EllipseSelect,
     Lasso,
@@ -33,6 +36,9 @@ class Canvas : public QWidget {
     std::function<void(const QString &)> message;
     std::function<void(const QStringList &)> filesDropped;
     void invalidate();
+    void invalidateRegion(QRect region);
+    int tilesRendered = 0;
+    bool pressureSize = true, pressureOpacity = true;
     void setTool(Tool value);
     void fit();
     void actualSize();
@@ -50,6 +56,7 @@ class Canvas : public QWidget {
     void mousePressEvent(QMouseEvent *) override;
     void mouseMoveEvent(QMouseEvent *) override;
     void mouseReleaseEvent(QMouseEvent *) override;
+    void tabletEvent(QTabletEvent *) override;
     void wheelEvent(QWheelEvent *) override;
     void keyPressEvent(QKeyEvent *) override;
     void keyReleaseEvent(QKeyEvent *) override;
@@ -57,9 +64,13 @@ class Canvas : public QWidget {
     void dropEvent(QDropEvent *) override;
 
   private:
-    QImage cached;
-    bool stale = true, pressed = false, panning = false, space = false, hasResized = false,
-         gestureEdited = false;
+    QCache<quint64, QImage> tiles{256};
+    QImage repairSource;
+    QPointF samplePoint, repairOffset;
+    QString sampleLayer;
+    bool hasSample = false, movingSelection = false;
+    double pressure = 1;
+    bool pressed = false, panning = false, space = false, hasResized = false, gestureEdited = false;
     bool scaling = false;
     double scale = 1;
     QPointF pan, start, last, panStart, widgetStart, cursor;

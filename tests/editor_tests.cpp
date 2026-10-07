@@ -22,6 +22,7 @@ static QImage solid(QSize size, QColor color) {
     return image;
 }
 int main(int argc, char **argv) {
+    qputenv("PHOTOSHIP_TESTING", "1");
     QApplication app(argc, argv);
     try {
         using namespace ps;

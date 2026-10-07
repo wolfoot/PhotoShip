@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=PhotoShip
+Comment=Layer-based image editor
+Comment[zh_CN]=支持图层的图像编辑器
+Comment[ja]=レイヤー対応の画像エディター
+Comment[ko]=레이어 기반 이미지 편집기
+Comment[fr]=Éditeur d’images avec calques
+Comment[de]=Bildeditor mit Ebenen
+Comment[es]=Editor de imágenes con capas
+Exec=photoship %F
+Icon=photoship
+Terminal=false
+Categories=Graphics;RasterGraphics;
+MimeType=image/png;image/jpeg;

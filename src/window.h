@@ -1,6 +1,10 @@
 #pragma once
 #include "canvas.h"
+#include "persistence.h"
 #include <QMainWindow>
+#include <QMap>
+#include <QSet>
+#include <QTimer>
 #include <memory>
 #include <vector>
 class QTabWidget;
@@ -18,6 +22,7 @@ class Window : public QMainWindow {
     Q_OBJECT
   public:
     Window();
+    ~Window() override;
     bool openPath(const QString &path);
     void newDocument(QSize size = QSize(1280, 800));
     Document *currentDocument() const;
@@ -27,10 +32,11 @@ class Window : public QMainWindow {
 
   protected:
     void closeEvent(QCloseEvent *) override;
+    void changeEvent(QEvent *) override;
 
   private:
     std::vector<std::unique_ptr<Document>> documents;
-    QTabWidget *tabs;
+    QTabWidget *tabs = nullptr;
     QTreeWidget *layers;
     QComboBox *blend, *parentGroup;
     QDoubleSpinBox *opacity, *x, *y, *layerWidth, *layerHeight, *rotation;
@@ -41,7 +47,15 @@ class Window : public QMainWindow {
     QAction *undoAction, *redoAction;
     Tool currentTool = Tool::Move;
     QColor foreground = QColor("#628cff");
-    bool syncing = false;
+    bool syncing = false, closeWindowAfterSave = false;
+    Persistence *persistence;
+    QTimer recoveryTimer, recoveryInterval;
+    QSet<Document *> closeAfterSave;
+    QMap<QString, quint64> recoveredRevision;
+    QSet<QString> recovering;
+    void recoverDocuments();
+    void snapshotRecovery();
+    void clearRecovery(Document *document);
     void addDocument(Document document);
     void refresh();
     void setTool(Tool tool);

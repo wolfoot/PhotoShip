@@ -1,0 +1,16 @@
+<RCC><qresource prefix="/">
+  <file alias="i18n/de.json">../assets/i18n/de.json</file>
+  <file alias="i18n/en.json">../assets/i18n/en.json</file>
+  <file alias="i18n/es.json">../assets/i18n/es.json</file>
+  <file alias="i18n/fr.json">../assets/i18n/fr.json</file>
+  <file alias="i18n/ja.json">../assets/i18n/ja.json</file>
+  <file alias="i18n/ko.json">../assets/i18n/ko.json</file>
+  <file alias="i18n/zh_CN.json">../assets/i18n/zh_CN.json</file>
+  <file alias="icons/photoship-128.png">../packaging/icons/photoship-128.png</file>
+  <file alias="icons/photoship-16.png">../packaging/icons/photoship-16.png</file>
+  <file alias="icons/photoship-256.png">../packaging/icons/photoship-256.png</file>
+  <file alias="icons/photoship-32.png">../packaging/icons/photoship-32.png</file>
+  <file alias="icons/photoship-48.png">../packaging/icons/photoship-48.png</file>
+  <file alias="icons/photoship-512.png">../packaging/icons/photoship-512.png</file>
+  <file alias="icons/photoship-64.png">../packaging/icons/photoship-64.png</file>
+</qresource></RCC>

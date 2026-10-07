@@ -1,25 +1,58 @@
-# Pixel Studio 0.1
+[简体中文](README.zh_CN.md) · [English](README.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [Español](README.es.md)
 
-Qt 6 + C++ 实现的 Ubuntu / Windows 类 Photoshop 桌面编辑器。参考 `/work/misc/Compositor` 的图层模型和工作流，复用其 MIT 授权的魔棒及边界追踪 C 算法。Compositor 源码目录没有被修改。
+# PhotoShip
 
-![界面预览](docs/preview.png)
+<p align="center">
+  <img src="packaging/icons/photoship-128.png" width="96" height="96" alt="PhotoShip — Layer Sail">
+</p>
 
-## 第一版功能
+**A lightweight, layer-based image editor for Ubuntu and Windows.**
 
-- 多文档标签、暗色桌面界面、图层缩略图、重命名、显示/隐藏、复制、删除、上下排序。
-- 分组与嵌套，在 Properties → Group 中移动图层；分组透明度/可见性传递到后代。
-- 12 种混合模式：Normal、Multiply、Screen、Overlay、Darken、Lighten、Color Dodge、Color Burn、Hard Light、Soft Light、Difference、Exclusion。
-- 非破坏移动、缩放、旋转、翻转；Properties 可输入精确值，Move 工具右下角手柄可缩放。
-- 画笔、橡皮、大小/透明度、矩形/椭圆选区、套索、连续魔棒；Shift 添加选区，Alt 减去选区。
-- 图层灰度蒙版：白色蒙版、选区生成、绘制、禁用、反相、移除。勾选 Edit mask 后黑色隐藏、白色显示。
-- 可编辑文字与矩形/椭圆形状；需要像素编辑时在 Layer 菜单栅格化。
-- 色阶、RGB 曲线（输入控制点）、HSV 色相/饱和度/明度、反相，作用于当前栅格层并遵守选区。
-- 裁剪、画布尺寸、撤销/重做、剪贴板图像、拖放导入、缩放与平移。
-- PNG/JPEG 导入和导出。额外图片格式取决于所安装 Qt 插件，首版只保证 PNG/JPEG。
-- 可编辑 `.psproj` 文件夹项目；安全保存、重新打开、脏状态及关闭前保存提示。
-- 基础 `.comp` 项目导入：栅格图层、分组、支持的混合模式、变换和关联栅格蒙版。不支持的特性明确报错，不会静默丢弃；导入后另存 `.psproj`，不覆盖原项目。
+Built with Qt 6 and C++17, PhotoShip offers brushes, selections, layer masks, non-destructive adjustments and editable projects for basic image editing, compositing and graphic creation. The application code is licensed under the [MIT license](LICENSE).
 
-## 本机启动
+[Build workflow](https://github.com/wolfoot/PhotoShip/actions/workflows/build.yml) · [Report an issue](https://github.com/wolfoot/PhotoShip/issues) · [Third-party notices](THIRD_PARTY_NOTICES.md)
+
+![PhotoShip — English interface](docs/preview.png)
+
+## Features
+
+| Category | Supported features |
+| --- | --- |
+| Documents and layers | Document tabs, nested groups, multiple selection, drag-and-drop ordering, batch duplication/deletion and adjacent layer merging |
+| Painting and retouching | Brush, eraser, eyedropper, tablet pressure, clone stamp and basic healing |
+| Selections and transforms | Rectangular/elliptical selections, lasso, contiguous magic wand, selection pixel move/copy, move, scale, rotate, flip and crop |
+| Compositing | 12 blend modes, opacity, raster masks, clipping masks, editable text and rectangle/ellipse shapes |
+| Adjustments | Levels, RGB curves, hue/saturation/brightness and invert, as adjustment layers or direct pixel edits |
+| Files | PNG/JPEG import/export, basic PSD import, basic Compositor `.comp` import and editable `.psproj` projects |
+| Workflow | Undo/redo, background saving/export, automatic recovery, clipboard, drag-and-drop import and viewport tile caching |
+| Languages | Simplified Chinese, English, Japanese, Korean, French, German and Spanish; instant switching with saved preferences |
+
+Current version: **0.2.1**. Ubuntu has been built, checked automatically and smoke-tested on X11 locally. Windows build and packaging scripts are provided, but still require validation on Windows. Tablet checks use simulated events; real hardware compatibility depends on the device and driver.
+
+## Get and install
+
+### Ubuntu
+
+Build baseline: Ubuntu 22.04/24.04 x86_64, Qt 6.2+, CMake 3.21+ and a C++17 compiler.
+
+```bash
+git clone https://github.com/wolfoot/PhotoShip.git
+cd PhotoShip
+sudo apt update
+sudo apt install qt6-base-dev qt6-qpa-plugins zlib1g-dev cmake ninja-build g++
+./scripts/build-linux.sh
+```
+
+The script builds the application, runs checks and creates `dist/photoship-0.2.1-Linux.deb`:
+
+```bash
+sudo apt install ./dist/photoship-0.2.1-Linux.deb
+photoship
+```
+
+The DEB dynamically links to system Qt; apt installs the required dependencies. Install `fonts-noto-cjk` if Chinese, Japanese or Korean fonts are missing. Offline installation requires runtime libraries and fonts to be prepared in advance.
+
+During development, run the application directly from the build directory:
 
 ```bash
 ./scripts/run.sh
@@ -27,81 +60,110 @@ Qt 6 + C++ 实现的 Ubuntu / Windows 类 Photoshop 桌面编辑器。参考 `/w
 ./scripts/run.sh /absolute/path/to/project.psproj
 ```
 
-当前工作区有仅在 `.deps/` 中解压的 Qt 6.2.4 开发库和运行库，启动脚本自动使用它们。没有修改系统安装；`.deps/` 和 `build/` 不进入源码分发。
+### Windows
 
-## Ubuntu 构建与安装
+Target: Windows 10/11 x64. Prepare:
 
-基线：Ubuntu 22.04/24.04 x86_64，Qt 6.2+，CMake 3.21+，C++17。
+- Visual Studio 2022 with the **Desktop development with C++** workload.
+- CMake and the **MSVC 2022 64-bit** component of Qt 6.8.3.
+- vcpkg with `zlib:x64-windows-static-md` for PSD ZIP decoding.
+- Inno Setup 6, only when building an installer.
 
-```bash
-sudo apt update
-sudo apt install qt6-base-dev qt6-qpa-plugins cmake ninja-build g++
-./scripts/build-linux.sh
-sudo apt install ./dist/pixelstudio-0.1.0-Linux.deb
-pixelstudio
-```
-
-`.deb` 动态依赖系统 Qt，不把完整 Qt 打入包内。安装时由 apt 补齐依赖；离线安装需要事先准备对应依赖包。首次测试和界面截图使用 Qt offscreen 平台，不要求显示服务器：
-
-```bash
-QT_QPA_PLATFORM=offscreen ./scripts/run.sh --screenshot /tmp/pixelstudio.png
-```
-
-## Windows 构建与安装
-
-目标：Windows 10/11 x64。准备 Visual Studio 2022 的 Desktop development with C++ 工作负载、CMake、Qt 6.8.3 的 MSVC 2022 64-bit 组件。可选安装 Inno Setup 6。
+Run PowerShell in the project directory:
 
 ```powershell
-./scripts/build-windows.ps1 -QtPrefix 'C:\Qt\6.8.3\msvc2022_64' -Installer
+vcpkg install zlib:x64-windows-static-md
+./scripts/build-windows.ps1 -QtPrefix 'C:\Qt\6.8.3\msvc2022_64' -ZlibToolchain 'C:\vcpkg\scripts\buildsystems\vcpkg.cmake'
 ```
 
-生成：
+This creates `dist/PhotoShip-0.2.1-windows-x64.zip`, a portable package with Qt runtime libraries. Extract it and run `photoship.exe`. Add `-Installer` to create `dist/PhotoShip-0.2.1-windows-x64-setup.exe`, which installs to the current user’s directory by default.
 
-- `dist/PixelStudio-0.1.0-windows-x64.zip`：含 Qt 运行库的便携版。
-- `dist/PixelStudio-0.1.0-windows-x64-setup.exe`：Inno Setup 安装器，默认安装到当前用户目录。
+The repository’s [GitHub Actions workflow](.github/workflows/build.yml) configures builds, checks and artifact uploads for both platforms. Download artifacts from successful workflow runs. Workflow configuration alone does not confirm platform validation.
 
-省略 `-Installer` 只生成便携 ZIP。`.github/workflows/build.yml` 配置了 Ubuntu/Windows 构建、测试和包产物上传，尚未在远程运行。当前 Linux 环境没有完成 Windows 编译或实机验证。
+## Usage
 
-## 快捷键
+1. Create a document or open an image, then select the layer to edit in the layers panel.
+2. Paint, select and transform with the left toolbar. Enter precise transform values in the right properties panel.
+3. Use the Layer menu for masks, clipping and merging, and the Image menu for adjustment layers.
+4. Use **Save project** to preserve editable content and **Export PNG / JPEG** for a flattened image.
 
-| 操作 | 快捷键 |
-|---|---|
-| 移动 / 画笔 / 橡皮 | V / B / E |
-| 矩形 / 椭圆选区 / 套索 / 魔棒 | M / Shift+M / L / W |
-| 裁剪 / 矩形形状 / 椭圆形状 | C / U / Shift+U |
-| 文字 / 吸管 / 手型 | T / I / H |
-| 平移 / 缩放 | 空格拖动或中键 / 滚轮 |
-| 缩小 / 放大画笔 | [ / ] |
-| 撤销 / 重做 | Ctrl+Z / Ctrl+Y 或 Ctrl+Shift+Z |
-| 新建 / 打开 / 保存 / 另存 | Ctrl+N / Ctrl+O / Ctrl+S / Ctrl+Shift+S |
-| 图片导入 / 导出 | Ctrl+Shift+O / Ctrl+Shift+E |
-| 复制图层 / 新建图层 | Ctrl+J / Ctrl+Shift+N |
-| 全选 / 取消选区 | Ctrl+A / Ctrl+D |
-| 适应画布 / 100% | Ctrl+0 / Ctrl+1 |
-| 取消当前笔画或拖动 | Esc |
+For clone and healing tools, **Alt-click** a source on the same raster layer before painting. Healing uses local RGB tone matching for basic retouching. When editing masks, black hides and white reveals.
 
-## 文件格式与数据保护
+Merging requires adjacent sibling layers with Normal blending. Clipping/adjustment dependencies or translucent ancestor groups may prevent merging to avoid changing the image. Groups use pass-through compositing, so adjustment layers can affect content below and outside their group.
 
-`.psproj` 是含 `manifest.json` 和 `images/` 的文件夹。格式标识为 `org.pixelstudio.project`，版本 1，8-bit sRGB；JSON 的图层顺序为从底到顶。
+### Languages
 
-保存时写入新的唯一 PNG 资产，然后用 `QSaveFile` 原子提交清单。清单提交成功后才清理旧资产，失败会保留旧清单及旧图层。`QLockFile` 防止同时保存同一目录。崩溃发生在提交之前时可能留下未引用的 PNG，但已保存内容仍有效。这不是多进程实时协作格式。
+Choose a language from **Language / 语言** without restarting. The first launch follows the system language, falling back to English when unsupported. Switching preserves document content, layer names and undo history.
 
-加载在临时 State 中验证 UUID、尺寸、像素预算、文件路径、父子关系、类型及资产，全部成功后才替换文档。禁止资产路径逃逸及符号链接。选区、撤销历史、缩放位置不写入项目。文字依赖本机字体，不嵌入字体，所以不同机器可能有字体替代或排版差异。
+Override the language for one launch without changing your saved preference:
 
-## 当前边界
+```bash
+./scripts/run.sh --language en
+# en / zh_CN / ja / ko / fr / de / es
+```
 
-- 首版采用 CPU/QPainter 合成，尚未实现 GPU、分块渲染或后台保存；大图操作可能阻塞界面。
-- 每边最多 8192 像素，画布最多 1600 万像素，全部图层源像素最多 3200 万，蒙版最多另计 3200 万，最多 256 图层。限制会主动拒绝超量输入。
-- 撤销最多 100 步，按唯一像素缓冲区统计约 256 MiB 的历史加当前图层存储预算。达到预算会裁掉旧历史；活跃图层本身超过预算时不能靠裁掉历史降低其占用。界面合成缓存、临时滤镜、缩略图等另占内存，这不是整个进程的内存硬上限。
-- 撤销用 Qt 隐式共享快照，修改某层会复制该层像素一次；尚未实现笔画图块差量。
-- 调整是可撤销的像素操作，暂不提供非破坏调整图层；曲线采用分段线性插值。蒙版与图层关联，不支持独立蒙版变换、分组蒙版或剪贴蒙版。
-- 形状是填充矩形/椭圆；文字采用 Qt 文本排版。没有钢笔路径、富文本或高级图层样式。
-- 尚未支持 PSD/PSB、RAW、16-bit/CMYK、ICC 工作空间切换、AI 抠图、液化、修复、图层合并、选区像素搬移或自动恢复。
-- 混合模式使用 Qt 的合成公式，不承诺与 Photoshop/Compositor 每个像素完全一致。
+Menus, panels, editing dialogs and common messages are localized. Some raw parser and operating-system diagnostics may still be in English.
 
-## 验证
+### Common shortcuts
 
-`tests/editor_tests.cpp` 是可执行的核心及界面回归检查，使用运行时检查而不是 Release 下失效的 assert。覆盖图层、分组、蒙版、变换绘画、选区、魔棒、调色、撤销、保存/加载、非法输入、PNG/JPEG 导出和鼠标选区事件。
+| Action | Shortcut |
+| --- | --- |
+| Move / brush / eraser | V / B / E |
+| Clone / heal | S / J, Alt-click to sample |
+| Rectangle / ellipse / lasso / magic wand | M / Shift+M / L / W |
+| Crop / rectangle shape / ellipse shape | C / U / Shift+U |
+| Text / eyedropper / hand | T / I / H |
+| Pan / zoom | Space-drag or middle button / mouse wheel |
+| Brush size | [ / ] |
+| Undo / redo | Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z |
+| New / open / save / save as | Ctrl+N / Ctrl+O / Ctrl+S / Ctrl+Shift+S |
+| Import / export | Ctrl+Shift+O / Ctrl+Shift+E |
+| Duplicate layer / merge selected layers | Ctrl+J / Ctrl+E |
+| Toggle clipping mask | Ctrl+Alt+G |
+| Select all / deselect | Ctrl+A / Ctrl+D |
+| Fit canvas / actual pixels | Ctrl+0 / Ctrl+1 |
+| Cancel stroke or drag | Esc |
+
+## Files and data storage
+
+### Editable projects
+
+A `.psproj` project is a folder containing `manifest.json` and `images/`; keep the entire folder when moving or backing up a project. Projects save layers, groups, masks, transforms, text and adjustment parameters. Selections, undo history and viewport positions are not saved. Text uses local fonts, so moving a project between machines can cause font substitution.
+
+Saving writes new assets and commits the manifest atomically, with a file lock to prevent simultaneous writes. Background saving records a snapshot taken when saving starts; subsequent edits require another save. Exporting an image does not mark the project as saved.
+
+Automatic recovery writes a snapshot about 1.5 seconds after editing stops and checks again every 30 seconds. At startup, restore, discard or keep snapshots for later. Restoration opens separate unsaved documents and preserves original projects. Edits whose snapshot has not finished may not be recoverable.
+
+PhotoShip retains the former Pixel Studio format identifier `org.pixelstudio.project` and data storage locations to preserve existing projects, language preferences and recovery snapshots. The current project format is version 2 and reads version 1. Set `PHOTOSHIP_RECOVERY_DIR` to override the recovery directory; the former `PIXELSTUDIO_RECOVERY_DIR` is also supported.
+
+### PSD and Compositor import
+
+PSD import supports PSD v1, 8-bit RGB, raster layers, groups, raster masks and some clipping relationships. Layer channels may use raw, RLE, ZIP or ZIP prediction compression. A compatibility report appears before import. Text, vectors, smart objects, effects and adjustment parameters may fall back to cached pixels or be skipped. PSD export is not supported.
+
+Basic `.comp` import supports raster layers, groups, transforms, supported blend modes and linked raster masks. Unsupported features produce an error. Save the imported document as `.psproj` to keep the original files.
+
+## Current limitations
+
+- Compositing uses CPU/QPainter with 256×256 viewport tiles. Some filters, PSD parsing and structural operations still run on the main thread.
+- Up to 8192 pixels per side and 16 million canvas pixels; up to 32 million source-layer pixels and another 32 million mask pixels; up to 256 layers. PSD files are limited to 256 MiB.
+- Undo is limited to 100 steps with an approximate 256 MiB history pixel-buffer budget. Active images, compositing caches and background snapshots use additional memory; this is not a process-wide memory cap.
+- The workspace is 8-bit sRGB. PSB, RAW, 16-bit/CMYK editing, pen paths, rich text, advanced layer styles, group masks, liquify and AI cutout are not supported.
+- PNG/JPEG are the basic import/export formats; additional image formats depend on installed Qt plugins. PSD import and blend formulas do not guarantee pixel-for-pixel matches with other editors.
+
+## Development and contribution
+
+The project uses C++17, Qt 6 Widgets/Concurrent and zlib. The application requires no network service or account. Main directories:
+
+```text
+src/                 Editor UI, document model, compositing, project and PSD I/O
+assets/i18n/         Embedded language catalogs
+packaging/           Desktop entry, icons, installer configuration and licenses
+scripts/             Build, launch, icon generation and X11 smoke checks
+tests/               Core, v2 feature and localization checks
+third_party/         Third-party code with original licenses
+```
+
+Generic build and check commands:
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -109,10 +171,20 @@ cmake --build build --parallel 4
 QT_QPA_PLATFORM=offscreen ctest --test-dir build --output-on-failure
 ```
 
-本机使用 `.deps` 时由 `scripts/build-linux.sh` 自动设置 Qt 路径。本机 Release 回归检查 76 项通过；AddressSanitizer / UndefinedBehaviorSanitizer 检查通过（未进行泄漏检查）。另外已通过独立 Xvfb 虚拟显示上的 X11 窗口启动及截图检查，并验证从 DEB 解压的可执行文件能够启动。
+Automated checks cover layer compositing, selections, undo, project I/O, PSD decoding, background saving, recovery and language switching. With Xvfb installed, run the X11 window smoke check:
 
-这不代表已验证真实桌面、数位板或不同显卡驱动。可在安装 Xvfb 后运行 `python3 scripts/check-x11.py` 重做 X11 冒烟检查。
+```bash
+python3 scripts/check-x11.py --language en
+```
 
-## 许可证
+The original **Layer Sail** icon source is `packaging/photoship.svg`, with seven PNG sizes and a Windows ICO. After editing the SVG, rebuild assets with `python3 scripts/render-icons.py`; this requires Linux librsvg, Cairo and Python Pillow. Language text lives in `assets/i18n/*.json`; rebuild after editing it.
 
-应用代码为 MIT。Compositor 原始版权声明保留在 `third_party/compositor/LICENSE`。Qt 动态库及插件采用各自许可证，详见 `THIRD_PARTY_NOTICES.md`。发行时保留对应 Qt 及插件许可通知。
+Use [Issues](https://github.com/wolfoot/PhotoShip/issues) to report reproduction steps, operating system, Qt version and sample files. Contributions through pull requests are welcome for fixes, translations and features. Preserve existing file-format compatibility and run relevant checks. Remove personal information from submitted projects, screenshots and logs.
+
+## License and acknowledgments
+
+PhotoShip application code is licensed under the [MIT license](LICENSE). The layer workflow draws on Compositor, whose MIT-licensed magic wand and boundary tracing code is reused. Original copyright and license notices are preserved in [third_party/compositor/LICENSE](third_party/compositor/LICENSE).
+
+Qt, Qt plugins and zlib have their own licenses; the application’s MIT license does not replace them. Preserve license notices and meet the applicable requirements when distributing. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+PhotoShip is an independent project, unaffiliated with Adobe, and contains no Photoshop code or assets.

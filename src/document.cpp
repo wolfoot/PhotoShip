@@ -20,32 +20,40 @@ QTransform Layer::transform() const {
     t.scale(flipX ? -1 : 1, flipY ? -1 : 1);
     return t;
 }
-QImage Layer::pixels() const {
+QImage Layer::pixels(QRect region) const {
+    QSize source = image.isNull() ? size.toSize() : image.size();
+    if (isGroup())
+        return {};
+    if (region.isNull())
+        region = QRect(QPoint(), source);
+    region = region.intersected(QRect(QPoint(), source));
+    if (region.isEmpty())
+        return {};
     QImage result;
     if (kind == "raster")
-        result = image;
-    else if (!isGroup()) {
-        const QSize source = image.isNull()
-                                 ? QSize(qMax(1, qRound(size.width())), qMax(1, qRound(size.height())))
-                                 : image.size();
-        result = QImage(source, QImage::Format_ARGB32_Premultiplied);
+        result = image.copy(region);
+    else {
+        result = QImage(region.size(), QImage::Format_ARGB32_Premultiplied);
         result.fill(Qt::transparent);
         QPainter p(&result);
+        p.translate(-region.topLeft());
         p.setRenderHint(QPainter::Antialiasing);
         p.setPen(Qt::NoPen);
         p.setBrush(color);
         if (kind == "text") {
             p.setFont(font);
             p.setPen(color);
-            p.drawText(QRectF(QPointF(0, 0), source), Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, text);
+            p.drawText(QRectF(QPoint(), source), Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, text);
         } else if (shape == "ellipse")
-            p.drawEllipse(QRectF(0, 0, source.width(), source.height()));
+            p.drawEllipse(QRectF(QPoint(), source));
         else
-            p.drawRect(QRectF(0, 0, source.width(), source.height()));
+            p.drawRect(QRectF(QPoint(), source));
     }
     if (!mask.isNull() && maskEnabled && !result.isNull()) {
         result = result.convertToFormat(QImage::Format_ARGB32_Premultiplied);
-        const QImage coverage = mask.convertToFormat(QImage::Format_Grayscale8).scaled(result.size());
+        QImage coverage = mask.size() == source
+                              ? mask.copy(region).convertToFormat(QImage::Format_Grayscale8)
+                              : mask.scaled(source).copy(region).convertToFormat(QImage::Format_Grayscale8);
         for (int y = 0; y < result.height(); ++y) {
             QRgb *line = reinterpret_cast<QRgb *>(result.scanLine(y));
             const uchar *m = coverage.constScanLine(y);
@@ -112,7 +120,7 @@ QStringList Document::descendants(const QString &id) const {
 qint64 Document::pixelCount() const {
     qint64 n = 0;
     for (const auto &l : state.layers)
-        if (!l.isGroup())
+        if (!l.isGroup() && l.kind != "adjustment")
             n += l.image.isNull() ? qint64(qRound(l.size.width())) * qRound(l.size.height())
                                   : qint64(l.image.width()) * l.image.height();
     return n;
@@ -120,16 +128,91 @@ qint64 Document::pixelCount() const {
 void Document::begin(const QString &label) {
     if (editing)
         return;
-    pending = {state, label, revision};
+    pending = {};
+    pending.state = state;
+    pending.label = label;
+    pending.revision = revision;
     editing = true;
+    lastChange = {};
+}
+void Document::beginStroke(const QString &label, bool mask) {
+    if (editing || !active())
+        return;
+    pending = {};
+    pending.label = label;
+    pending.revision = revision;
+    pending.stroke = true;
+    pending.mask = mask;
+    pending.layerID = state.active;
+    pending.createdMask = mask && active()->mask.isNull();
+    editing = true;
+    lastChange = {};
+}
+void Document::captureTiles(QImage &target, QRect bounds) {
+    if (!editing || !pending.stroke)
+        return;
+    bounds = bounds.intersected(target.rect());
+    if (bounds.isEmpty())
+        return;
+    constexpr int tile = 256;
+    for (int y = bounds.top() / tile * tile; y <= bounds.bottom(); y += tile)
+        for (int x = bounds.left() / tile * tile; x <= bounds.right(); x += tile) {
+            QRect r = QRect(x, y, tile, tile).intersected(target.rect());
+            bool found = false;
+            for (const auto &patch : pending.patches)
+                if (patch.bounds == r) {
+                    found = true;
+                    break;
+                }
+            if (!found)
+                pending.patches.append({r, target.copy(r), {}});
+        }
+}
+void Document::applyPatches(const HistoryEntry &entry, bool after) {
+    int i = index(entry.layerID);
+    if (i < 0)
+        return;
+    auto &l = state.layers[i];
+    if (entry.createdMask && !after) {
+        l.mask = {};
+        return;
+    }
+    QImage &target = entry.mask ? l.mask : l.image;
+    if (target.isNull() && entry.mask) {
+        target =
+            QImage(l.image.isNull() ? l.size.toSize() : l.image.size(), QImage::Format_ARGB32_Premultiplied);
+        target.fill(Qt::white);
+    }
+    QPainter p(&target);
+    p.setCompositionMode(QPainter::CompositionMode_Source);
+    for (const auto &patch : entry.patches)
+        p.drawImage(patch.bounds.topLeft(), after ? patch.after : patch.before);
 }
 void Document::commit() {
     if (!editing)
         return;
-    past.append(pending);
-    future.clear();
+    if (pending.stroke) {
+        int i = index(pending.layerID);
+        if (i >= 0) {
+            const QImage &target = pending.mask ? state.layers[i].mask : state.layers[i].image;
+            for (auto &patch : pending.patches)
+                patch.after = target.copy(patch.bounds);
+            pending.patches.erase(std::remove_if(pending.patches.begin(), pending.patches.end(),
+                                                 [](const PixelPatch &p) { return p.before == p.after; }),
+                                  pending.patches.end());
+        }
+        if (pending.patches.isEmpty() && !pending.createdMask) {
+            editing = false;
+            pending = {};
+            return;
+        }
+    }
     revision = qMax(nextRevision, revision + 1);
     nextRevision = revision + 1;
+    pending.afterRevision = revision;
+    past.append(std::move(pending));
+    future.clear();
+    pending = {};
     editing = false;
     trimHistory();
     notify();
@@ -137,9 +220,14 @@ void Document::commit() {
 void Document::cancel() {
     if (!editing)
         return;
-    state = pending.state;
+    if (pending.stroke)
+        applyPatches(pending, false);
+    else
+        state = pending.state;
     revision = pending.revision;
+    pending = {};
     editing = false;
+    lastChange = {};
     notify();
 }
 void Document::edit(const QString &label, const std::function<void()> &op) {
@@ -151,43 +239,75 @@ void Document::undo() {
     if (editing || past.isEmpty())
         return;
     auto e = past.takeLast();
-    future.append({state, e.label, revision});
-    state = e.state;
-    revision = e.revision;
+    if (e.stroke) {
+        applyPatches(e, false);
+        revision = e.revision;
+        future.append(std::move(e));
+    } else {
+        HistoryEntry reverse;
+        reverse.state = state;
+        reverse.label = e.label;
+        reverse.revision = revision;
+        future.append(std::move(reverse));
+        state = e.state;
+        revision = e.revision;
+    }
+    lastChange = {};
     notify();
 }
 void Document::redo() {
     if (editing || future.isEmpty())
         return;
     auto e = future.takeLast();
-    past.append({state, e.label, revision});
-    state = e.state;
-    revision = e.revision;
+    if (e.stroke) {
+        applyPatches(e, true);
+        revision = e.afterRevision;
+        past.append(std::move(e));
+    } else {
+        HistoryEntry reverse;
+        reverse.state = state;
+        reverse.label = e.label;
+        reverse.revision = revision;
+        past.append(std::move(reverse));
+        state = e.state;
+        revision = e.revision;
+    }
+    lastChange = {};
     trimHistory();
     notify();
 }
-void Document::trimHistory() {
-    // QImage snapshots share unchanged storage. Edited layers detach once per stroke.
-    // ponytail: bounded whole-layer snapshots; tile deltas when large-document painting is added.
-    auto bytes = [&]() {
-        QSet<qint64> seen;
-        qint64 total = 0;
-        auto visit = [&](const State &s) {
-            for (const auto &l : s.layers)
-                for (const auto &im : {l.image, l.mask})
-                    if (!im.isNull() && !seen.contains(im.cacheKey())) {
-                        seen.insert(im.cacheKey());
-                        total += im.sizeInBytes();
-                    }
-        };
-        visit(state);
-        for (const auto &e : past)
-            visit(e.state);
-        for (const auto &e : future)
-            visit(e.state);
-        return total;
+qint64 Document::historyBytes() const {
+    QSet<qint64> seen;
+    qint64 total = 0;
+    auto image = [&](const QImage &im) {
+        if (!im.isNull() && !seen.contains(im.cacheKey())) {
+            seen.insert(im.cacheKey());
+            total += im.sizeInBytes();
+        }
     };
-    while (past.size() + future.size() > 100 || bytes() > 256LL * 1024 * 1024) {
+    auto visit = [&](const HistoryEntry &entry) {
+        if (!entry.stroke)
+            for (const auto &l : entry.state.layers) {
+                image(l.image);
+                image(l.mask);
+            }
+        for (const auto &p : entry.patches) {
+            image(p.before);
+            image(p.after);
+        }
+    };
+    for (const auto &l : state.layers) {
+        seen.insert(l.image.cacheKey());
+        seen.insert(l.mask.cacheKey());
+    }
+    for (const auto &e : past)
+        visit(e);
+    for (const auto &e : future)
+        visit(e);
+    return total;
+}
+void Document::trimHistory() {
+    while (past.size() + future.size() > 100 || historyBytes() > 256LL * 1024 * 1024) {
         if (!past.isEmpty())
             past.removeFirst();
         else if (!future.isEmpty())
@@ -195,7 +315,6 @@ void Document::trimHistory() {
         else
             break;
     }
-    pending = {};
 }
 bool Document::canAdd(qint64 pixels, int count, QString *error) const {
     if (state.layers.size() + count > MaxLayers || pixelCount() + pixels > MaxSourcePixels) {
@@ -217,6 +336,7 @@ void Document::insert(Layer layer) {
             ++at;
     }
     state.active = layer.id;
+    state.selected = {layer.id};
     state.layers.insert(at, layer);
 }
 bool Document::addImage(const QImage &source, const QString &name, QString *error) {
@@ -307,37 +427,42 @@ bool Document::addShape(QString shape, QColor color, QRectF bounds, QString *err
     return true;
 }
 bool Document::duplicate(QString *error) {
-    const Layer *a = active();
-    if (!a)
+    auto roots = selectedRoots(), ids = selectedMembers();
+    if (roots.isEmpty())
         return false;
-    auto ids = descendants(a->id);
     qint64 pixels = 0;
     for (const auto &l : state.layers)
-        if (ids.contains(l.id) && !l.isGroup())
+        if (ids.contains(l.id) && !l.isGroup() && l.kind != "adjustment")
             pixels += l.image.isNull() ? qint64(qRound(l.size.width())) * qRound(l.size.height())
                                        : qint64(l.image.width()) * l.image.height();
     if (!canAdd(pixels, ids.size(), error))
         return false;
-    edit("Duplicate layer", [&]() {
+    edit("Duplicate selected layers", [&] {
         QMap<QString, QString> map;
-        for (const auto &id : ids)
+        for (auto id : ids)
             map[id] = QUuid::createUuid().toString(QUuid::WithoutBraces);
-        QVector<Layer> copies;
-        int at = 0;
-        for (int i = 0; i < state.layers.size(); ++i)
-            if (ids.contains(state.layers[i].id)) {
-                auto l = state.layers[i];
-                at = i + 1;
-                l.id = map[l.id];
-                if (map.contains(l.parent))
-                    l.parent = map[l.parent];
-                if (l.id == map[ids[0]])
-                    l.name += " copy";
-                copies.append(l);
-            }
-        for (int i = 0; i < copies.size(); ++i)
-            state.layers.insert(at + i, copies[i]);
-        state.active = map[ids[0]];
+        QStringList selected;
+        for (auto root : roots) {
+            auto members = descendants(root);
+            QVector<Layer> copies;
+            int at = index(root) + 1;
+            for (int i = 0; i < state.layers.size(); ++i)
+                if (members.contains(state.layers[i].id)) {
+                    auto l = state.layers[i];
+                    at = i + 1;
+                    l.id = map[l.id];
+                    if (map.contains(l.parent))
+                        l.parent = map[l.parent];
+                    if (members.first() == state.layers[i].id)
+                        l.name += " copy";
+                    copies << l;
+                }
+            for (int i = 0; i < copies.size(); ++i)
+                state.layers.insert(at + i, copies[i]);
+            selected << map[root];
+        }
+        state.selected = selected;
+        state.active = selected.last();
     });
     return true;
 }
@@ -345,11 +470,12 @@ void Document::remove() {
     if (!active())
         return;
     edit("Delete layer", [&]() {
-        auto ids = descendants(state.active);
+        auto ids = selectedMembers();
         for (int i = state.layers.size() - 1; i >= 0; --i)
             if (ids.contains(state.layers[i].id))
                 state.layers.removeAt(i);
         state.active = state.layers.isEmpty() ? QString() : state.layers.last().id;
+        state.selected = state.active.isEmpty() ? QStringList() : QStringList{state.active};
     });
 }
 void Document::reorder(int direction) {
@@ -434,16 +560,46 @@ static QPainter::CompositionMode composition(const QString &name) {
         {"Exclusion", QPainter::CompositionMode_Exclusion}};
     return modes.value(name, QPainter::CompositionMode_SourceOver);
 }
-void Document::render(QPainter &p) const {
-    p.save();
-    p.setClipRect(QRect(QPoint(), state.size), Qt::IntersectClip);
-    p.setRenderHint(QPainter::SmoothPixmapTransform);
-    p.setRenderHint(QPainter::Antialiasing);
+void Document::render(QPainter &p, QRect region) const {
+    if (region.isNull())
+        region = QRect(QPoint(), state.size);
+    p.drawImage(region.topLeft(), compositeTile(region));
+}
+QImage Document::compositeTile(QRect region) const {
+    region = region.intersected(QRect(QPoint(), state.size));
+    if (region.isEmpty())
+        return {};
+    QImage result(region.size(), QImage::Format_ARGB32_Premultiplied);
+    result.fill(Qt::transparent);
+    result.setColorSpace(QColorSpace::SRgb);
+    QMap<QString, QImage> bases;
+    auto drawLayer = [&](const Layer &l, double opacity) {
+        QImage tile(region.size(), QImage::Format_ARGB32_Premultiplied);
+        tile.fill(Qt::transparent);
+        QPainter q(&tile);
+        q.setRenderHint(QPainter::Antialiasing);
+        q.setRenderHint(QPainter::SmoothPixmapTransform, !l.nearest);
+        q.translate(-region.topLeft());
+        q.setOpacity(opacity);
+        q.setTransform(l.transform(), true);
+        QSize source = l.image.isNull() ? l.size.toSize() : l.image.size();
+        QRect local = l.transform()
+                          .inverted()
+                          .mapRect(QRectF(region))
+                          .toAlignedRect()
+                          .adjusted(-2, -2, 2, 2)
+                          .intersected(QRect(QPoint(), source));
+        if (!local.isEmpty())
+            q.drawImage(local.topLeft(), l.pixels(local));
+        return tile;
+    };
     for (const auto &l : state.layers) {
-        if (l.isGroup() || !l.visible)
+        if (l.isGroup()) {
+            bases.remove(l.parent);
             continue;
+        }
         double opacity = l.opacity;
-        bool visible = true;
+        bool visible = l.visible;
         QString parent = l.parent;
         for (int depth = 0; !parent.isEmpty() && depth < MaxLayers; ++depth) {
             int i = index(parent);
@@ -456,17 +612,70 @@ void Document::render(QPainter &p) const {
             opacity *= g.opacity;
             parent = g.parent;
         }
+        if (l.kind == "adjustment") {
+            if (!visible || opacity <= 0)
+                continue;
+            QImage changed = adjustedImage(result, l);
+            QImage coverage(region.size(), QImage::Format_ARGB32_Premultiplied);
+            coverage.fill(Qt::transparent);
+            {
+                QPainter q(&coverage);
+                q.translate(-region.topLeft());
+                q.setTransform(l.transform(), true);
+                q.setOpacity(opacity);
+                QSize size = l.size.toSize();
+                QRect local = l.transform()
+                                  .inverted()
+                                  .mapRect(QRectF(region))
+                                  .toAlignedRect()
+                                  .intersected(QRect(QPoint(), size));
+                if (l.mask.isNull() || !l.maskEnabled)
+                    q.fillRect(QRect(QPoint(), size), Qt::white);
+                else {
+                    QImage m = l.mask.copy(local).convertToFormat(QImage::Format_ARGB32);
+                    for (int y = 0; y < m.height(); ++y) {
+                        auto row = reinterpret_cast<QRgb *>(m.scanLine(y));
+                        for (int x = 0; x < m.width(); ++x) {
+                            int v = qGray(row[x]);
+                            row[x] = qRgba(v, v, v, v);
+                        }
+                    }
+                    q.drawImage(local.topLeft(), m);
+                }
+            }
+            for (int y = 0; y < result.height(); ++y) {
+                auto out = reinterpret_cast<QRgb *>(result.scanLine(y));
+                const auto in = reinterpret_cast<const QRgb *>(changed.constScanLine(y));
+                const auto m = reinterpret_cast<const QRgb *>(coverage.constScanLine(y));
+                for (int x = 0; x < result.width(); ++x) {
+                    int a = qAlpha(m[x]);
+                    out[x] =
+                        qRgba((qRed(out[x]) * (255 - a) + qRed(in[x]) * a + 127) / 255,
+                              (qGreen(out[x]) * (255 - a) + qGreen(in[x]) * a + 127) / 255,
+                              (qBlue(out[x]) * (255 - a) + qBlue(in[x]) * a + 127) / 255, qAlpha(out[x]));
+                }
+            }
+            continue;
+        }
+        QImage tile = drawLayer(l, visible ? opacity : 0);
+        if (l.clipped) {
+            QImage base = bases.value(l.parent);
+            if (base.isNull())
+                tile.fill(Qt::transparent);
+            else {
+                QPainter q(&tile);
+                q.setCompositionMode(QPainter::CompositionMode_DestinationIn);
+                q.drawImage(QPoint(), base);
+            }
+        } else
+            bases[l.parent] = tile;
         if (!visible || opacity <= 0)
             continue;
-        p.save();
-        p.setOpacity(opacity);
-        p.setCompositionMode(composition(l.blend));
-        p.setRenderHint(QPainter::SmoothPixmapTransform, !l.nearest);
-        p.setTransform(l.transform(), true);
-        p.drawImage(QPointF(), l.pixels());
-        p.restore();
+        QPainter q(&result);
+        q.setCompositionMode(composition(l.blend));
+        q.drawImage(QPoint(), tile);
     }
-    p.restore();
+    return result;
 }
 QImage Document::composite() const {
     QImage result(state.size, QImage::Format_ARGB32_Premultiplied);
@@ -475,7 +684,11 @@ QImage Document::composite() const {
     result.setDotsPerMeterX(qRound(state.resolution / .0254));
     result.setDotsPerMeterY(qRound(state.resolution / .0254));
     QPainter p(&result);
-    render(p);
+    for (int y = 0; y < state.size.height(); y += 256)
+        for (int x = 0; x < state.size.width(); x += 256) {
+            QRect tile = QRect(x, y, 256, 256).intersected(result.rect());
+            p.drawImage(tile.topLeft(), compositeTile(tile));
+        }
     return result;
 }
 void Document::crop(QRect bounds) {
@@ -504,6 +717,12 @@ void Document::paint(QPointF from, QPointF to, double diameter, QColor color, do
     QTransform inverse = l->transform().inverted(&invertible);
     if (!invertible)
         return;
+    QRect dirty = QRectF(from, to)
+                      .normalized()
+                      .adjusted(-diameter / 2 - 2, -diameter / 2 - 2, diameter / 2 + 2, diameter / 2 + 2)
+                      .toAlignedRect()
+                      .intersected(QRect(QPoint(), state.size));
+    captureTiles(target, inverse.mapRect(QRectF(dirty)).toAlignedRect().adjusted(-2, -2, 2, 2));
     QPainter p(&target);
     p.setRenderHint(QPainter::Antialiasing);
     p.setTransform(inverse);
@@ -523,6 +742,10 @@ void Document::paint(QPointF from, QPointF to, double diameter, QColor color, do
         p.drawEllipse(to, diameter / 2, diameter / 2);
     } else
         p.drawLine(from, to);
+    p.end();
+    lastChange = lastChange.united(dirty);
+    if (regionChanged && !dirty.isEmpty())
+        regionChanged(dirty);
 }
 void Document::fill(QColor color, bool onMask) {
     Layer *l = active();
