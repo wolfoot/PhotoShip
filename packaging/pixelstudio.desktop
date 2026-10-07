@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Pixel Studio
+Comment=Layer-based image editor
+Exec=pixelstudio %F
+Icon=pixelstudio
+Terminal=false
+Categories=Graphics;RasterGraphics;
+MimeType=image/png;image/jpeg;

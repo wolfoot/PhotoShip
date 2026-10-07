@@ -1,0 +1,10 @@
+/build*/
+/.deps/
+/dist/
+*.user
+__pycache__/
+*.pyc
+
+/.agents/
+/.codex/
+/.aws/
